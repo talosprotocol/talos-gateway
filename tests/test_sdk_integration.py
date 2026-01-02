@@ -16,10 +16,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Skip all tests if talos_sdk is not installed
 import importlib.util
+
 SDK_AVAILABLE = importlib.util.find_spec("talos_sdk") is not None
 
 pytestmark = pytest.mark.skipif(not SDK_AVAILABLE, reason="talos_sdk not installed")
-
 
 
 class TestBootstrap:
