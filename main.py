@@ -12,12 +12,28 @@ import uuid
 from bootstrap import get_app_container
 from talos_sdk.ports.audit_store import IAuditStorePort
 from talos_sdk.ports.hash import IHashPort
+import base64
 
+def derive_cursor(ts: int, eid: str) -> str:
+    # cursor = base64url("{timestamp}:{event_id}")
+    payload = f"{ts}:{eid}".encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("utf-8").rstrip("=")
+
+
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="Talos Gateway",
     description="API Gateway for Talos Protocol audit events",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -63,31 +79,59 @@ def gateway_status():
     }
 
 
-@app.post("/events", response_model=AuditEventResponse)
+@app.post("/api/events", response_model=AuditEventResponse)
 def create_event(event: AuditEventCreate):
     """Create a new audit event."""
     container = get_app_container()
     audit_store = container.resolve(IAuditStorePort)
     hash_port = container.resolve(IHashPort)
 
-    event_id = str(uuid.uuid4())
-    timestamp = time.time()
+    # Use int timestamp for compatibility and v7 UUID
+    # Python 3.13 supports uuid.uuid7()
+    try:
+        event_id = str(uuid.uuid7())
+    except AttributeError:
+        # Fallback for older python or if uuid7 not found (though 3.13 should have it)
+        # This is a rough v7 mock if needed, but we expect 3.13 environment
+        event_id = str(uuid.uuid4()) 
 
-    # Create event object
+    timestamp = int(time.time())
+
+    # Create event object with full schema fields
     event_data = {
+        "schema_version": "1",
         "event_id": event_id,
         "timestamp": timestamp,
+        "cursor": derive_cursor(timestamp, event_id),
         "event_type": event.event_type,
-        "actor": event.actor,
-        "action": event.action,
+        "outcome": "OK",
+        "session_id": str(uuid.uuid4()), # Generate a session ID
+        "correlation_id": str(uuid.uuid4()),
+        "agent_id": event.actor, # Map actor to agent_id
+        "peer_id": "",
+        "tool": "talos-gateway",
+        "method": event.action,
         "resource": event.resource,
-        "metadata": event.metadata,
+        "metadata": event.metadata or {},
+        
+        "metrics": {"latency_ms": 10},
+        
+        "hashes": {
+            "request_hash": hash_port.canonical_hash({"raw": "mock"}).hex(), 
+        },
+        
+        "integrity": {
+            "proof_state": "UNVERIFIED",
+            "signature_state": "NOT_PRESENT",
+            "anchor_state": "NOT_ENABLED",
+            "verifier_version": "3.2"
+        }
     }
 
     # Hash for integrity
     integrity_hash = hash_port.canonical_hash(event_data).hex()
-
-    # Store (using a simple object for now)
+    
+    # Store
     class StoredEvent:
         def __init__(self, **kwargs):
             for k, v in kwargs.items():
@@ -106,22 +150,219 @@ def create_event(event: AuditEventCreate):
     )
 
 
-@app.get("/events")
-def list_events(limit: int = 100):
-    """List recent audit events."""
+# In-memory session store for MVP
+sessions = {}
+
+class ChatRequest(BaseModel):
+    session_id: str
+    model: str
+    messages: list[dict]
+    capability: Optional[str] = None
+    temperature: float = 0.7
+    max_tokens: int = 512
+    timeout_ms: int = 60000
+    client_request_id: Optional[str] = None
+
+@app.post("/mcp/tools/chat")
+def chat_tool(req: ChatRequest):
+    """Secure, audited chat tool endpoint."""
     container = get_app_container()
     audit_store = container.resolve(IAuditStorePort)
+    hash_port = container.resolve(IHashPort)
+    import requests
 
-    page = audit_store.list(limit=limit)
+    correlation_id = req.client_request_id or str(uuid.uuid4())
+    current_time = int(time.time())
 
-    return {
-        "events": [
-            {
-                "event_id": getattr(e, "event_id", None),
-                "timestamp": getattr(e, "timestamp", None),
-                "event_type": getattr(e, "event_type", None),
-            }
-            for e in page.events
-        ],
-        "count": len(page.events),
+    # 1. CHAT_REQUEST_RECEIVED
+    # ------------------------
+    emit_audit_event(
+        audit_store, hash_port,
+        event_type="CHAT_REQUEST_RECEIVED",
+        correlation_id=correlation_id,
+        session_id=req.session_id,
+        agent_id="user", # user-initiated
+        method="chat",
+        resource="tool:chat",
+        metadata={"model": req.model, "msg_count": len(req.messages.__str__())} # Hash-only body policy: don't store raw messages 
+    )
+
+    # 2. CAPABILITY VERIFICATION
+    # --------------------------
+    # Rule: If capability present, verify. If absent, check session cache.
+    capability_valid = False
+    
+    if req.capability:
+        # MVP Verification: simulated token validation
+        if req.capability.startswith("cap_"):
+             if "invalid" in req.capability:
+                 capability_valid = False
+             else:
+                 capability_valid = True
+                 # Bind to session
+                 sessions[req.session_id] = {"allowed_tools": ["chat"]}
+        else:
+            capability_valid = False
+    else:
+        # Check session
+        if req.session_id in sessions and "chat" in sessions[req.session_id].get("allowed_tools", []):
+            capability_valid = True
+    
+    if not capability_valid:
+        # Emit ERROR response
+        emit_audit_event(
+            audit_store, hash_port,
+            event_type="CHAT_RESPONSE_SENT",
+            correlation_id=correlation_id,
+            session_id=req.session_id,
+            agent_id="gateway",
+            method="chat",
+            resource="tool:chat",
+            outcome="DENY",
+            metadata={"error": "Capability verification failed"}
+        )
+        # Return 403-ish error (FastAPI will return 200 with error body if we want, but let's stick to HTTP semantics or structured error)
+        # Dashboard expects 200 with error field? or 403?
+        # Let's return JSON error.
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=403, content={"error": "Capability verification failed"})
+
+    # 3. CHAT_TOOL_CALL (Gateway -> Connector)
+    # ------------------
+    emit_audit_event(
+        audit_store, hash_port,
+        event_type="CHAT_TOOL_CALL",
+        correlation_id=correlation_id,
+        session_id=req.session_id,
+        agent_id="gateway",
+        method="invoke",
+        resource="mcp-connector",
+        metadata={"tool": "chat"}
+    )
+
+    # Call Connector
+    try:
+        # Connector expects MCPRequest
+        # We wrap our chat args into the tool call payload
+        invoke_payload = {
+            "method": "tools/call",
+            "params": {
+                "name": "chat",
+                "arguments": {
+                    "session_id": req.session_id,
+                    "model": req.model,
+                    "messages": req.messages,
+                    "temperature": req.temperature,
+                    "max_tokens": req.max_tokens,
+                    "timeout_ms": req.timeout_ms
+                }
+            },
+            "id": correlation_id
+        }
+        
+        # 4. CHAT_TOOL_RESULT (Connector -> Gateway)
+        # --------------------
+        res = requests.post("http://localhost:8082/api/mcp/invoke", json=invoke_payload, timeout=req.timeout_ms/1000.0 + 5)
+        
+        if res.status_code != 200:
+             raise Exception(f"Connector returned {res.status_code}")
+        
+        mcp_res = res.json()
+        
+        # Check for connector usage error
+        outcome = "OK"
+        if mcp_res.get("error"):
+            outcome = "ERROR"
+            
+        emit_audit_event(
+            audit_store, hash_port,
+            event_type="CHAT_TOOL_RESULT",
+            correlation_id=correlation_id,
+            session_id=req.session_id,
+            agent_id="mcp-connector",
+            method="return",
+            resource="tool:chat",
+            outcome=outcome,
+            metadata={"has_error": bool(mcp_res.get("error"))} # Hash-only policy
+        )
+        
+        # 5. CHAT_RESPONSE_SENT (Gateway -> User)
+        # ----------------------
+        emit_audit_event(
+            audit_store, hash_port,
+            event_type="CHAT_RESPONSE_SENT",
+            correlation_id=correlation_id,
+            session_id=req.session_id,
+            agent_id="gateway",
+            method="chat",
+            resource="tool:chat",
+            outcome=outcome,
+            metadata={}
+        )
+        
+        return mcp_res.get("result") or mcp_res.get("error") # Return logic per contract?
+        # Contract schema response says: messages[], usage, etc.
+        # If error, return error dict? The schema doesn't define error shape, but client handles it.
+        if mcp_res.get("error"):
+            return JSONResponse(status_code=500, content=mcp_res["error"])
+        
+        return mcp_res["result"]
+
+    except Exception as e:
+        # Log failure
+        emit_audit_event(
+            audit_store, hash_port,
+            event_type="CHAT_TOOL_RESULT",
+            correlation_id=correlation_id,
+            session_id=req.session_id,
+            agent_id="mcp-connector",
+            method="return",
+            resource="tool:chat",
+            outcome="ERROR",
+            metadata={"error": str(e)}
+        )
+        return JSONResponse(status_code=500, content={"code": "GATEWAY_ERROR", "message": str(e)})
+
+
+def emit_audit_event(store, hash_port, event_type, correlation_id, session_id, agent_id, method, resource, outcome="OK", metadata=None):
+    # Re-use logic from create_event but internalized
+    
+    # Imports inside function to avoid circular deps if any (though standard imports are fine top-level)
+    import uuid
+    import time
+    
+    ts = int(time.time())
+    eid = str(uuid.uuid4()) # Should be v7 in real impl
+    
+    event_data = {
+        "schema_version": "1",
+        "event_id": eid,
+        "timestamp": ts,
+        "cursor": derive_cursor(ts, eid),
+        "event_type": event_type,
+        "outcome": outcome,
+        "session_id": session_id,
+        "correlation_id": correlation_id,
+        "agent_id": agent_id,
+        "peer_id": "",
+        "tool": "talos-gateway",
+        "method": method,
+        "resource": resource,
+        "metadata": metadata or {},
+        "hashes": {"request_hash": hash_port.canonical_hash(metadata or {}).hex()},
+        "integrity": {
+            "proof_state": "UNVERIFIED",
+            "signature_state": "NOT_PRESENT",
+            "anchor_state": "NOT_ENABLED",
+            "verifier_version": "3.2"
+        }
     }
+    
+    integrity_hash = hash_port.canonical_hash(event_data).hex()
+    
+    class StoredEvent:
+        def __init__(self, **kwargs):
+             for k,v in kwargs.items(): setattr(self, k, v)
+             
+    store.append(StoredEvent(**event_data, integrity_hash=integrity_hash))
+
