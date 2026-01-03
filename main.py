@@ -19,6 +19,41 @@ def derive_cursor(ts: int, eid: str) -> str:
     payload = f"{ts}:{eid}".encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("utf-8").rstrip("=")
 
+# UUIDv7 generator for Python < 3.13 compatibility
+def generate_uuid7() -> str:
+    """Generate a UUIDv7 (time-ordered) identifier.
+    
+    Format: xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx
+    - First 48 bits: Unix timestamp in milliseconds
+    - Version nibble: 7
+    - Variant bits: RFC 4122 (10xx)
+    - Remaining: Random
+    """
+    import os
+    import struct
+    
+    # Get current time in milliseconds
+    ts_ms = int(time.time() * 1000)
+    
+    # 48-bit timestamp (6 bytes)
+    ts_bytes = struct.pack(">Q", ts_ms)[2:]  # Take last 6 bytes of 8-byte big-endian
+    
+    # Random bytes for the rest (10 bytes)
+    rand_bytes = os.urandom(10)
+    
+    # Build the 16-byte UUID
+    uuid_bytes = bytearray(ts_bytes + rand_bytes)
+    
+    # Set version to 7 (bits 48-51)
+    uuid_bytes[6] = (uuid_bytes[6] & 0x0F) | 0x70
+    
+    # Set variant to RFC 4122 (bits 64-65 = 10)
+    uuid_bytes[8] = (uuid_bytes[8] & 0x3F) | 0x80
+    
+    # Format as UUID string
+    hex_str = uuid_bytes.hex()
+    return f"{hex_str[0:8]}-{hex_str[8:12]}-{hex_str[12:16]}-{hex_str[16:20]}-{hex_str[20:32]}"
+
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -86,14 +121,8 @@ def create_event(event: AuditEventCreate):
     audit_store = container.resolve(IAuditStorePort)
     hash_port = container.resolve(IHashPort)
 
-    # Use int timestamp for compatibility and v7 UUID
-    # Python 3.13 supports uuid.uuid7()
-    try:
-        event_id = str(uuid.uuid7())
-    except AttributeError:
-        # Fallback for older python or if uuid7 not found (though 3.13 should have it)
-        # This is a rough v7 mock if needed, but we expect 3.13 environment
-        event_id = str(uuid.uuid4()) 
+    # Use UUIDv7 for time-ordered, cursor-compatible event IDs
+    event_id = generate_uuid7() 
 
     timestamp = int(time.time())
 
@@ -377,7 +406,7 @@ def emit_audit_event(store, hash_port, event_type, correlation_id, session_id, a
     import time
     
     ts = int(time.time())
-    eid = str(uuid.uuid4()) # Should be v7 in real impl
+    eid = generate_uuid7()  # UUIDv7 for cursor compatibility
     
     event_data = {
         "schema_version": "1",
