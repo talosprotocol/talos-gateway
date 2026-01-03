@@ -49,6 +49,20 @@ def health_check():
     return {"status": "ok", "timestamp": time.time()}
 
 
+@app.get("/api/gateway/status")
+def gateway_status():
+    """Gateway status endpoint for integration tests."""
+    import os
+
+    return {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "version": "0.1.0",
+        "env": os.getenv("TALOS_ENV", "production"),
+        "run_id": os.getenv("TALOS_RUN_ID", "default"),
+    }
+
+
 @app.post("/events", response_model=AuditEventResponse)
 def create_event(event: AuditEventCreate):
     """Create a new audit event."""
