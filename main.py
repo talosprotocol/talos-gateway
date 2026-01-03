@@ -150,6 +150,51 @@ def create_event(event: AuditEventCreate):
     )
 
 
+@app.get("/api/events")
+def list_events(limit: int = 100):
+    """List recent audit events."""
+    container = get_app_container()
+    audit_store = container.resolve(IAuditStorePort)
+
+    page = audit_store.list(limit=limit)
+
+    return {
+        "items": [
+            {
+                "schema_version": getattr(e, "schema_version", "1"),
+                "event_id": getattr(e, "event_id", ""),
+                "timestamp": getattr(e, "timestamp", 0),
+                "cursor": getattr(e, "cursor", ""),
+                "event_type": getattr(e, "event_type", "ERROR"),
+                "outcome": getattr(e, "outcome", "OK"),
+                
+                "session_id": getattr(e, "session_id", ""),
+                "correlation_id": getattr(e, "correlation_id", ""),
+                "agent_id": getattr(e, "agent_id", ""),
+                "peer_id": getattr(e, "peer_id", ""),
+                "tool": getattr(e, "tool", ""),
+                "method": getattr(e, "method", ""),
+                "resource": getattr(e, "resource", ""),
+                "metadata": getattr(e, "metadata", {}),
+                
+                "metrics": getattr(e, "metrics", {}),
+                "hashes": getattr(e, "hashes", {}),
+                
+                # Integrity object is required by frontend schema
+                "integrity": getattr(e, "integrity", {
+                    "proof_state": "UNVERIFIED",
+                    "signature_state": "NOT_PRESENT",
+                    "anchor_state": "NOT_ENABLED", 
+                    "verifier_version": "3.2"
+                }),
+            }
+            for e in page.events
+        ],
+        "next_cursor": None,
+        "has_more": False,
+    }
+
+
 # In-memory session store for MVP
 sessions = {}
 
