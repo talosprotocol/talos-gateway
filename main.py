@@ -402,7 +402,6 @@ def emit_audit_event(store, hash_port, event_type, correlation_id, session_id, a
     # Re-use logic from create_event but internalized
     
     # Imports inside function to avoid circular deps if any (though standard imports are fine top-level)
-    import uuid
     import time
     
     ts = int(time.time())

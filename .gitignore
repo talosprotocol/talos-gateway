@@ -43,3 +43,5 @@ Thumbs.db
 
 # mypy
 .mypy_cache/
+conformance.xml
+junit.xml
