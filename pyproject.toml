@@ -1,6 +1,6 @@
 [project]
 name = "talos-gateway"
-version = "3.3.16"
+version = "3.3.17"
 description = "Talos Protocol API Gateway"
 requires-python = ">=3.10"
 dependencies = [
