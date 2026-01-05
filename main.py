@@ -20,8 +20,16 @@ from talos_sdk.ports.audit_store import IAuditStorePort
 from talos_sdk.ports.hash import IHashPort
 
 
+TOOL_CHAT = "tool:chat"
+
+
+class ConnectorError(Exception):
+    """Custom exception for connector failures."""
+
+    pass
+
+
 def derive_cursor(ts: int, eid: str) -> str:
-    # cursor = base64url("{timestamp}:{event_id}")
     payload = f"{ts}:{eid}".encode("utf-8")
     return base64.urlsafe_b64encode(payload).decode("utf-8").rstrip("=")
 
@@ -36,8 +44,6 @@ def generate_uuid7() -> str:
     - Variant bits: RFC 4122 (10xx)
     - Remaining: Random
     """
-    # ts_ms = int(time.time() * 1000)
-
     # Get current time in milliseconds
     ts_ms = int(time.time() * 1000)
 
@@ -240,6 +246,53 @@ class ChatRequest(BaseModel):
     client_request_id: Optional[str] = None
 
 
+def verify_capability(req: ChatRequest) -> bool:
+    """Simulated capability verification."""
+    if req.capability:
+        if req.capability.startswith("cap_"):
+            if "invalid" in req.capability:
+                return False
+            # Bind to session
+            sessions[req.session_id] = {"allowed_tools": ["chat"]}
+            return True
+        return False
+
+    # Check session
+    return req.session_id in sessions and "chat" in sessions[req.session_id].get(
+        "allowed_tools", []
+    )
+
+
+def invoke_connector_chat(req: ChatRequest, correlation_id: str) -> dict:
+    """Low-level connector invocation."""
+    invoke_payload = {
+        "method": "tools/call",
+        "params": {
+            "name": "chat",
+            "arguments": {
+                "session_id": req.session_id,
+                "model": req.model,
+                "messages": req.messages,
+                "temperature": req.temperature,
+                "max_tokens": req.max_tokens,
+                "timeout_ms": req.timeout_ms,
+            },
+        },
+        "id": correlation_id,
+    }
+
+    res = requests.post(
+        "http://localhost:8082/api/mcp/invoke",
+        json=invoke_payload,
+        timeout=req.timeout_ms / 1000.0 + 5,
+    )
+
+    if res.status_code != 200:
+        raise ConnectorError(f"Connector returned {res.status_code}")
+
+    return res.json()
+
+
 @app.post("/mcp/tools/chat")
 def chat_tool(req: ChatRequest):
     """Secure, audited chat tool endpoint."""
@@ -250,47 +303,20 @@ def chat_tool(req: ChatRequest):
     correlation_id = req.client_request_id or str(uuid.uuid4())
 
     # 1. CHAT_REQUEST_RECEIVED
-    # ------------------------
     emit_audit_event(
         audit_store,
         hash_port,
         event_type="CHAT_REQUEST_RECEIVED",
         correlation_id=correlation_id,
         session_id=req.session_id,
-        agent_id="user",  # user-initiated
+        agent_id="user",
         method="chat",
-        resource="tool:chat",
-        metadata={
-            "model": req.model,
-            "msg_count": len(req.messages.__str__()),
-        },  # Hash-only body policy: don't store raw messages
+        resource=TOOL_CHAT,
+        metadata={"model": req.model, "msg_count": len(req.messages)},
     )
 
     # 2. CAPABILITY VERIFICATION
-    # --------------------------
-    # Rule: If capability present, verify. If absent, check session cache.
-    capability_valid = False
-
-    if req.capability:
-        # MVP Verification: simulated token validation
-        if req.capability.startswith("cap_"):
-            if "invalid" in req.capability:
-                capability_valid = False
-            else:
-                capability_valid = True
-                # Bind to session
-                sessions[req.session_id] = {"allowed_tools": ["chat"]}
-        else:
-            capability_valid = False
-    else:
-        # Check session
-        if req.session_id in sessions and "chat" in sessions[req.session_id].get(
-            "allowed_tools", []
-        ):
-            capability_valid = True
-
-    if not capability_valid:
-        # Emit ERROR response
+    if not verify_capability(req):
         emit_audit_event(
             audit_store,
             hash_port,
@@ -299,17 +325,13 @@ def chat_tool(req: ChatRequest):
             session_id=req.session_id,
             agent_id="gateway",
             method="chat",
-            resource="tool:chat",
+            resource=TOOL_CHAT,
             outcome="DENY",
             metadata={"error": "Capability verification failed"},
         )
-        # Return 403-ish error (FastAPI will return 200 with error body if we want, but let's stick to HTTP semantics or structured error)
-        # Dashboard expects 200 with error field? or 403?
-        # Let's return JSON error.
         return JSONResponse(status_code=403, content={"error": "Capability verification failed"})
 
     # 3. CHAT_TOOL_CALL (Gateway -> Connector)
-    # ------------------
     emit_audit_event(
         audit_store,
         hash_port,
@@ -322,43 +344,9 @@ def chat_tool(req: ChatRequest):
         metadata={"tool": "chat"},
     )
 
-    # Call Connector
     try:
-        # Connector expects MCPRequest
-        # We wrap our chat args into the tool call payload
-        invoke_payload = {
-            "method": "tools/call",
-            "params": {
-                "name": "chat",
-                "arguments": {
-                    "session_id": req.session_id,
-                    "model": req.model,
-                    "messages": req.messages,
-                    "temperature": req.temperature,
-                    "max_tokens": req.max_tokens,
-                    "timeout_ms": req.timeout_ms,
-                },
-            },
-            "id": correlation_id,
-        }
-
-        # 4. CHAT_TOOL_RESULT (Connector -> Gateway)
-        # --------------------
-        res = requests.post(
-            "http://localhost:8082/api/mcp/invoke",
-            json=invoke_payload,
-            timeout=req.timeout_ms / 1000.0 + 5,
-        )
-
-        if res.status_code != 200:
-            raise Exception(f"Connector returned {res.status_code}")
-
-        mcp_res = res.json()
-
-        # Check for connector usage error
-        outcome = "OK"
-        if mcp_res.get("error"):
-            outcome = "ERROR"
+        mcp_res = invoke_connector_chat(req, correlation_id)
+        outcome = "ERROR" if mcp_res.get("error") else "OK"
 
         emit_audit_event(
             audit_store,
@@ -368,13 +356,11 @@ def chat_tool(req: ChatRequest):
             session_id=req.session_id,
             agent_id="mcp-connector",
             method="return",
-            resource="tool:chat",
+            resource=TOOL_CHAT,
             outcome=outcome,
-            metadata={"has_error": bool(mcp_res.get("error"))},  # Hash-only policy
+            metadata={"has_error": bool(mcp_res.get("error"))},
         )
 
-        # 5. CHAT_RESPONSE_SENT (Gateway -> User)
-        # ----------------------
         emit_audit_event(
             audit_store,
             hash_port,
@@ -383,21 +369,16 @@ def chat_tool(req: ChatRequest):
             session_id=req.session_id,
             agent_id="gateway",
             method="chat",
-            resource="tool:chat",
+            resource=TOOL_CHAT,
             outcome=outcome,
             metadata={},
         )
 
-        return mcp_res.get("result") or mcp_res.get("error")  # Return logic per contract?
-        # Contract schema response says: messages[], usage, etc.
-        # If error, return error dict? The schema doesn't define error shape, but client handles it.
         if mcp_res.get("error"):
             return JSONResponse(status_code=500, content=mcp_res["error"])
-
         return mcp_res["result"]
 
     except Exception as e:
-        # Log failure
         emit_audit_event(
             audit_store,
             hash_port,
@@ -406,7 +387,7 @@ def chat_tool(req: ChatRequest):
             session_id=req.session_id,
             agent_id="mcp-connector",
             method="return",
-            resource="tool:chat",
+            resource=TOOL_CHAT,
             outcome="ERROR",
             metadata={"error": str(e)},
         )
