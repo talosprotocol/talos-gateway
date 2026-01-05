@@ -21,7 +21,8 @@ fi
 echo "Starting $SERVICE_NAME on port $PORT..."
 TALOS_ENV="${TALOS_ENV:-production}" \
 TALOS_RUN_ID="${TALOS_RUN_ID:-default}" \
-uvicorn main:app --port "$PORT" --host 127.0.0.1 > "$LOG_FILE" 2>&1 &
+uvicorn main:app --port "$PORT" --host 0.0.0.0 > "$LOG_FILE" 2>&1 &
+
 
 PID=$!
 echo "$PID" > "$PID_FILE"

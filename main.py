@@ -3,16 +3,21 @@ Talos Gateway - FastAPI Application
 Exposes REST API for audit events and integrity verification.
 """
 
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import Optional
 import time
 import uuid
+import base64
+import os
+import struct
+import requests
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional
 
 from bootstrap import get_app_container
 from talos_sdk.ports.audit_store import IAuditStorePort
 from talos_sdk.ports.hash import IHashPort
-import base64
 
 def derive_cursor(ts: int, eid: str) -> str:
     # cursor = base64url("{timestamp}:{event_id}")
@@ -29,8 +34,7 @@ def generate_uuid7() -> str:
     - Variant bits: RFC 4122 (10xx)
     - Remaining: Random
     """
-    import os
-    import struct
+    # ts_ms = int(time.time() * 1000)
     
     # Get current time in milliseconds
     ts_ms = int(time.time() * 1000)
@@ -55,7 +59,7 @@ def generate_uuid7() -> str:
     return f"{hex_str[0:8]}-{hex_str[8:12]}-{hex_str[12:16]}-{hex_str[16:20]}-{hex_str[20:32]}"
 
 
-from fastapi.middleware.cors import CORSMiddleware
+
 
 app = FastAPI(
     title="Talos Gateway",
@@ -103,7 +107,6 @@ def health_check():
 @app.get("/api/gateway/status")
 def gateway_status():
     """Gateway status endpoint for integration tests."""
-    import os
 
     return {
         "status": "healthy",
@@ -246,7 +249,6 @@ def chat_tool(req: ChatRequest):
     import requests
 
     correlation_id = req.client_request_id or str(uuid.uuid4())
-    current_time = int(time.time())
 
     # 1. CHAT_REQUEST_RECEIVED
     # ------------------------
@@ -298,7 +300,6 @@ def chat_tool(req: ChatRequest):
         # Return 403-ish error (FastAPI will return 200 with error body if we want, but let's stick to HTTP semantics or structured error)
         # Dashboard expects 200 with error field? or 403?
         # Let's return JSON error.
-        from fastapi.responses import JSONResponse
         return JSONResponse(status_code=403, content={"error": "Capability verification failed"})
 
     # 3. CHAT_TOOL_CALL (Gateway -> Connector)
@@ -401,9 +402,6 @@ def chat_tool(req: ChatRequest):
 def emit_audit_event(store, hash_port, event_type, correlation_id, session_id, agent_id, method, resource, outcome="OK", metadata=None):
     # Re-use logic from create_event but internalized
     
-    # Imports inside function to avoid circular deps if any (though standard imports are fine top-level)
-    import time
-    
     ts = int(time.time())
     eid = generate_uuid7()  # UUIDv7 for cursor compatibility
     
@@ -435,7 +433,8 @@ def emit_audit_event(store, hash_port, event_type, correlation_id, session_id, a
     
     class StoredEvent:
         def __init__(self, **kwargs):
-             for k,v in kwargs.items(): setattr(self, k, v)
+             for k, v in kwargs.items():
+                 setattr(self, k, v)
              
     store.append(StoredEvent(**event_data, integrity_hash=integrity_hash))
 
