@@ -3,7 +3,11 @@ Bootstrap module for Talos Gateway.
 Sets up Dependency Injection container with SDK adapters.
 """
 
+from dotenv import load_dotenv
 from talos_sdk.container import Container, get_container
+
+# Ensure env is loaded early
+load_dotenv()
 from talos_sdk.ports.audit_store import IAuditStorePort
 from talos_sdk.ports.crypto import ICryptoPort
 from talos_sdk.ports.hash import IHashPort
@@ -17,7 +21,14 @@ def bootstrap() -> Container:
     container = get_container()
 
     # Register adapters
-    container.register(IAuditStorePort, InMemoryAuditStore())
+    storage_type = "postgres"  # Enforce for this epic, or use os.getenv("TALOS_STORAGE_TYPE", "memory")
+    
+    if storage_type == "postgres":
+        from src.adapters.postgres_store import PostgresAuditStore
+        container.register(IAuditStorePort, PostgresAuditStore())
+    else:
+        container.register(IAuditStorePort, InMemoryAuditStore())
+
     container.register(ICryptoPort, Ed25519CryptoAdapter())
     container.register(IHashPort, NativeHashAdapter())
 

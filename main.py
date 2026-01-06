@@ -9,19 +9,30 @@ import base64
 import os
 import struct
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from typing import Optional
+import asyncio
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
+
+
+# Import WS Handler and Manager
+from src.handlers import stream
+from src.stream.manager import manager as ws_manager
 
 from bootstrap import get_app_container
 from talos_sdk.ports.audit_store import IAuditStorePort
 from talos_sdk.ports.hash import IHashPort
 
 
-TOOL_CHAT = "tool:chat"
-
+# Global background tasks reference
+background_tasks = set()
 
 class ConnectorError(Exception):
     """Custom exception for connector failures."""
@@ -72,6 +83,9 @@ app = FastAPI(
     description="API Gateway for Talos Protocol audit events",
     version="0.1.0",
 )
+
+# Register WS Router
+app.include_router(stream.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -124,7 +138,7 @@ def gateway_status():
 
 
 @app.post("/api/events", response_model=AuditEventResponse)
-def create_event(event: AuditEventCreate):
+async def create_event(event: AuditEventCreate):
     """Create a new audit event."""
     container = get_app_container()
     audit_store = container.resolve(IAuditStorePort)
@@ -172,7 +186,15 @@ def create_event(event: AuditEventCreate):
             for k, v in kwargs.items():
                 setattr(self, k, v)
 
-    audit_store.append(StoredEvent(**event_data, integrity_hash=integrity_hash))
+    # Run blocking sync DB call in threadpool
+    await run_in_threadpool(audit_store.append, StoredEvent(**event_data, integrity_hash=integrity_hash))
+
+    # Broadcast to WS clients
+    # Note: In a real distributed system this would efficiently fan-out via Redis PubSub
+    # For now, local memory broadcast
+    task = asyncio.create_task(ws_manager.broadcast_event(event_data))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
     return AuditEventResponse(
         event_id=event_id,
@@ -186,12 +208,23 @@ def create_event(event: AuditEventCreate):
 
 
 @app.get("/api/events")
-def list_events(limit: int = 100):
-    """List recent audit events."""
+def list_events(
+    limit: int = 100, 
+    cursor: Optional[str] = None, 
+    session_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    outcome: Optional[str] = None
+):
+    """List recent audit events with filters."""
     container = get_app_container()
     audit_store = container.resolve(IAuditStorePort)
 
-    page = audit_store.list(limit=limit)
+    filters = {}
+    if session_id: filters["session_id"] = session_id
+    if correlation_id: filters["correlation_id"] = correlation_id
+    if outcome: filters["outcome"] = outcome
+
+    page = audit_store.list(before=cursor, limit=limit, filters=filters)
 
     return {
         "items": [
@@ -226,9 +259,21 @@ def list_events(limit: int = 100):
             }
             for e in page.events
         ],
-        "next_cursor": None,
-        "has_more": False,
+        "next_cursor": page.next_cursor,
+        "has_more": len(page.events) >= limit,
     }
+
+
+@app.get("/api/events/stats")
+def get_event_stats(
+    from_ts: float = Query(..., alias="from"), 
+    to_ts: float = Query(..., alias="to")
+):
+    """Get audit statistics."""
+    container = get_app_container()
+    audit_store = container.resolve(IAuditStorePort)
+    
+    return audit_store.stats(from_ts, to_ts)
 
 
 # In-memory session store for MVP
