@@ -9,7 +9,7 @@ sys.path.append(os.getcwd())
 from src.adapters.postgres_store import PostgresAuditStore
 
 def wait_for_db(store, retries=30):
-    for i in range(retries):
+    for _ in range(retries):
         try:
             store._ensure_connection()
             with store._get_cursor() as cur:
@@ -19,7 +19,7 @@ def wait_for_db(store, retries=30):
         except Exception as e:
             print(f"Waiting for DB... ({e})")
             time.sleep(2)
-    raise Exception("Could not connect to DB")
+    raise ConnectionError("Could not connect to DB")
 
 def test_store():
     print("Initializing Store...")
