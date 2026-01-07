@@ -36,6 +36,8 @@ from talos_contracts import derive_cursor
 
 # Global background tasks reference
 background_tasks = set()
+TOOL_CHAT = "chat"
+
 
 
 class ConnectorError(Exception):
