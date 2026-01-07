@@ -30,19 +30,18 @@ from bootstrap import get_app_container
 from talos_sdk.ports.audit_store import IAuditStorePort
 from talos_sdk.ports.hash import IHashPort
 
+# Import derive_cursor from canonical contracts (boundary purity)
+from talos_contracts import derive_cursor
+
 
 # Global background tasks reference
 background_tasks = set()
+
 
 class ConnectorError(Exception):
     """Custom exception for connector failures."""
 
     pass
-
-
-def derive_cursor(ts: int, eid: str) -> str:
-    payload = f"{ts}:{eid}".encode("utf-8")
-    return base64.urlsafe_b64encode(payload).decode("utf-8").rstrip("=")
 
 
 # UUIDv7 generator for Python < 3.13 compatibility
