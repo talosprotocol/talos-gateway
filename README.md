@@ -63,3 +63,9 @@ Evaluation: N/A for this repo (See: `talos-dashboard` for network stats).
 
 1.  [Talos Wiki](https://github.com/talosprotocol/talos/wiki)
 2.  [Architecture](https://github.com/talosprotocol/talos/wiki/Architecture)
+
+## License
+
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
