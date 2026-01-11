@@ -26,14 +26,14 @@ def test_store():
     store = PostgresAuditStore()
     wait_for_db(store)
     
-    # Create mock event
-    class MockEvent:
+    # Create stub event
+    class StubEvent:
         pass
     
     eid = str(uuid.uuid4())
     ts = int(time.time())
     
-    event = MockEvent()
+    event = StubEvent()
     event.event_id = eid
     event.schema_version = '1'
     event.timestamp = ts
