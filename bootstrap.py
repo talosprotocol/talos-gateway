@@ -21,7 +21,8 @@ def bootstrap() -> Container:
     container = get_container()
 
     # Register adapters
-    storage_type = "postgres"  # Enforce for this epic, or use os.getenv("TALOS_STORAGE_TYPE", "memory")
+    import os
+    storage_type = os.getenv("TALOS_STORAGE_TYPE", "memory")
     
     if storage_type == "postgres":
         from src.adapters.postgres_store import PostgresAuditStore

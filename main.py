@@ -88,6 +88,9 @@ app = FastAPI(
 # Register WS Router
 app.include_router(stream.router)
 
+from src.routers import mcp
+app.include_router(mcp.router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
