@@ -9,11 +9,19 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for caching
-COPY requirements.txt ./
+COPY services/gateway/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install local SDK
+COPY sdks/python /sdks/python
+RUN pip install --no-cache-dir /sdks/python
+
+# Install Contracts
+COPY contracts/python /contracts/python
+RUN pip install --no-cache-dir /contracts/python
+
 # Copy application
-COPY . .
+COPY services/gateway/ .
 
 # Environment
 ENV PYTHONUNBUFFERED=1
