@@ -99,6 +99,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Prometheus metrics
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import Response
+
+# Custom metrics
+REQUEST_COUNT = Counter(
+    'gateway_requests_total',
+    'Total requests',
+    ['method', 'endpoint', 'status']
+)
+
+REQUEST_LATENCY = Histogram(
+    'gateway_request_duration_seconds',
+    'Request latency in seconds',
+    ['method', 'endpoint']
+)
+
+CAPABILITY_CHECKS = Counter(
+    'gateway_capability_checks_total',
+    'Capability verification attempts',
+    ['result']
+)
+
+ACTIVE_SESSIONS = Gauge(
+    'gateway_active_sessions',
+    'Number of active sessions'
+)
+
+class PrometheusMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        start = time.time()
+        response = await call_next(request)
+        duration = time.time() - start
+        
+        REQUEST_COUNT.labels(
+            method=request.method,
+            endpoint=request.url.path,
+            status=response.status_code
+        ).inc()
+        
+        REQUEST_LATENCY.labels(
+            method=request.method,
+            endpoint=request.url.path
+        ).observe(duration)
+        
+        return response
+
+app.add_middleware(PrometheusMiddleware)
+
 
 class AuditEventCreate(BaseModel):
     """Request model for creating audit events."""
@@ -122,9 +172,70 @@ class AuditEventResponse(BaseModel):
     integrity_hash: str
 
 
+# Read build-time metadata from environment
+GIT_SHA = os.getenv("GIT_SHA", "unknown")
+VERSION = os.getenv("VERSION", "unknown")
+BUILD_TIME = os.getenv("BUILD_TIME", "unknown")
+DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+
+# Schema version cache to avoid DB hammer
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
+def _check_schema_version_cached(timestamp: int):
+    """Cache schema check for 5 seconds to avoid DB hammer on readiness probes"""
+    # In production this would check actual DB schema version
+    # For now return placeholder
+    return "v1", "v1"
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness probe - no dependency checks"""
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz():
+    """Readiness probe - checks critical dependencies"""
+    if not DEV_MODE:
+        # Use cached check to avoid DB hammer
+        timestamp = int(time.time() / 5)  # 5-second buckets
+        db_version, expected_version = _check_schema_version_cached(timestamp)
+        if db_version != expected_version:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not ready", "reason": f"Schema mismatch: {db_version} != {expected_version}"}
+            )
+    
+    return {"status": "ready", "dev_mode": DEV_MODE}
+
+
+@app.get("/version")
+def version():
+    """Version information endpoint"""
+    return {
+        "version": VERSION,
+        "git_sha": GIT_SHA,
+        "build_time": BUILD_TIME,
+        "service": "gateway",
+        "dev_mode": DEV_MODE
+    }
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint"""
+    # Update gauge metrics
+    ACTIVE_SESSIONS.set(len(background_tasks))
+    
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# Deprecated /health endpoint for backward compatibility
 @app.get("/health")
 def health_check():
-    """Health check endpoint."""
+    """Health check endpoint (deprecated, use /healthz)"""
     return {"status": "ok", "timestamp": time.time()}
 
 

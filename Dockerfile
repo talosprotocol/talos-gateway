@@ -1,36 +1,62 @@
-# Talos Gateway - Dockerfile
+# ========================================
+# Builder Stage
+# ========================================
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY sdks/python /build/sdks/python
+COPY contracts/python /build/contracts/python
+COPY services/gateway/requirements.txt .
+
+RUN pip wheel --no-cache-dir --wheel-dir /wheels \
+    -r requirements.txt \
+    /build/sdks/python \
+    /build/contracts/python
+
+# ========================================
+# Runtime Stage
+# ========================================
 FROM python:3.11-slim
 
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+ARG GIT_SHA=unknown
+ARG VERSION=unknown
+ARG BUILD_TIME=unknown
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    GIT_SHA=${GIT_SHA} \
+    VERSION=${VERSION} \
+    BUILD_TIME=${BUILD_TIME}
+
+RUN groupadd --system --gid 1001 talos && \
+    useradd --system --uid 1001 --gid talos --create-home talos
 
 WORKDIR /app
 
-# Install curl for healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
 
-# Copy requirements first for caching
-COPY services/gateway/requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --chown=1001:1001 services/gateway/ .
 
-# Install local SDK
-COPY sdks/python /sdks/python
-RUN pip install --no-cache-dir /sdks/python
+# Writable mounts for read-only root filesystem
+RUN mkdir -p /tmp /var/run && chown -R 1001:1001 /tmp /var/run
 
-# Install Contracts
-COPY contracts/python /contracts/python
-RUN pip install --no-cache-dir /contracts/python
-
-# Copy application
-COPY services/gateway/ .
-
-# Environment
-ENV PYTHONUNBUFFERED=1
-ENV TALOS_GATEWAY_PORT=8080
-
-# Health check
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+USER 1001:1001
 
 EXPOSE 8080
 
+HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')" || exit 1
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+LABEL org.opencontainers.image.source="https://github.com/talosprotocol/talos" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.created="${BUILD_TIME}" \
+      org.opencontainers.image.licenses="Apache-2.0"
