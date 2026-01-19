@@ -30,3 +30,49 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WS error {session_id}: {e}")
         manager.disconnect(session_id)
+
+
+from fastapi.responses import StreamingResponse
+from fastapi import Request
+import json
+import uuid
+import asyncio
+
+@router.get("/events")
+async def sse_audit_stream(request: Request):
+    """
+    Server-Sent Events endpoint for dashboard audit stream.
+    Compatible with Talos Audit Service protocol.
+    """
+    session_id = str(uuid.uuid4())
+    queue = manager.connect_sse(session_id)
+    
+    async def event_generator():
+        try:
+            # Send initial connection metadata
+            yield f"event: meta\ndata: {json.dumps({'status':'connected', 'session_id': session_id})}\n\n"
+            
+            while True:
+                if await request.is_disconnected():
+                    break
+                
+                try:
+                    # Wait for message with timeout to allow heartbeat
+                    msg = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    
+                    # Convert internal message format to SSE
+                    # msg is { type: "event", event: {...}, ... }
+                    if msg.get("type") == "event":
+                        yield f"event: audit_event\ndata: {json.dumps(msg['event'])}\n\n"
+                        
+                except asyncio.TimeoutError:
+                    # Send Heartbeat
+                    yield ": heartbeat\n\n"
+                    
+        finally:
+            manager.disconnect(session_id)
+
+    return StreamingResponse(
+        event_generator(), 
+        media_type="text/event-stream"
+    )

@@ -21,6 +21,7 @@ class ConnectionManager:
     def connect(self, websocket: WebSocket, session_id: str, filters: dict = None):
         # WebSocket is already accepted by session handshake
         self.active_connections[session_id] = {
+            "type": "ws",
             "ws": websocket,
             "queue": asyncio.Queue(maxsize=self.queue_limit),
             "created_at": time.time(),
@@ -33,6 +34,18 @@ class ConnectionManager:
         task = asyncio.create_task(self._consumer_loop(session_id))
         self.background_tasks.add(task)
         task.add_done_callback(self.background_tasks.discard)
+
+    def connect_sse(self, session_id: str, filters: dict = None) -> asyncio.Queue:
+        queue = asyncio.Queue(maxsize=self.queue_limit)
+        self.active_connections[session_id] = {
+            "type": "sse",
+            "queue": queue,
+            "created_at": time.time(),
+            "connected": True,
+            "filters": filters or {}
+        }
+        logger.info(f"SSE Connected: {session_id}")
+        return queue
 
     def disconnect(self, session_id: str):
         if session_id in self.active_connections:
