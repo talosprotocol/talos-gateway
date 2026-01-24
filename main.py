@@ -8,13 +8,13 @@ import uuid
 import base64
 import os
 import struct
-import requests
+import requests  # type: ignore
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Set, Any
 import asyncio
 from dotenv import load_dotenv
 
@@ -27,15 +27,15 @@ from src.handlers import stream
 from src.stream.manager import manager as ws_manager
 
 from bootstrap import get_app_container
-from talos_sdk.ports.audit_store import IAuditStorePort
-from talos_sdk.ports.hash import IHashPort
+from talos_sdk.ports.audit_store import IAuditStorePort  # type: ignore
+from talos_sdk.ports.hash import IHashPort  # type: ignore
 
 # Import derive_cursor from canonical contracts (boundary purity)
-from talos_contracts import derive_cursor
+from talos_contracts import derive_cursor  # type: ignore
 
 
 # Global background tasks reference
-background_tasks = set()
+background_tasks: Set[asyncio.Task[Any]] = set()
 TOOL_CHAT = "chat"
 
 
@@ -104,7 +104,7 @@ app.add_middleware(
 )
 
 # Prometheus metrics
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import Response
 
@@ -226,6 +226,17 @@ def version():
         "build_time": BUILD_TIME,
         "service": "gateway",
         "dev_mode": DEV_MODE
+    }
+
+
+@app.get("/metrics/summary")
+def metrics_summary():
+    """Summary metrics for TUI/Dashboard"""
+    return {
+        "latency_p50_ms": 12.5,  # Mock for now
+        "latency_p95_ms": 45.2,
+        "connected_peers": 3,
+        "active_sessions": len(background_tasks)
     }
 
 
