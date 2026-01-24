@@ -132,6 +132,16 @@ ACTIVE_SESSIONS = Gauge(
     'Number of active sessions'
 )
 
+# Audit Forwarding counters
+AUDIT_FORWARD_SUCCESS = Counter(
+    'audit_forward_success_total',
+    'Total audit events successfully forwarded'
+)
+AUDIT_FORWARD_FAILURE = Counter(
+    'audit_forward_failure_total',
+    'Total audit events that failed to forward'
+)
+
 class PrometheusMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         start = time.time()
@@ -183,6 +193,7 @@ BUILD_TIME = os.getenv("BUILD_TIME", "unknown")
 DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
 START_TIME = time.time()
 INSTANCE_ID = str(uuid.uuid4())
+AUDIT_SERVICE_URL = os.getenv("TALOS_AUDIT_URL", "http://talos-audit-service:8001")
 
 # Schema version cache to avoid DB hammer
 from functools import lru_cache
@@ -285,72 +296,87 @@ def gateway_status():
 
 @app.post("/api/events", response_model=AuditEventResponse)
 async def create_event(event: AuditEventCreate):
-    """Create a new audit event."""
-    container = get_app_container()
-    audit_store = container.resolve(IAuditStorePort)
-    hash_port = container.resolve(IHashPort)
+    """Create a new audit event (Proxies to Audit Service)."""
+    # Patch 2: Lock down boundary
+    if not DEV_MODE:
+         return JSONResponse(
+             status_code=403, 
+             content={"error": "Direct audit submission disabled in production. Audits are generated as side-effects."}
+         )
 
+    # Patch 1: Synchronous forward
+    import logging
+    logger = logging.getLogger("gateway-audit")
+    
     # Use UUIDv7 for time-ordered, cursor-compatible event IDs
     event_id = generate_uuid7()
-
     timestamp = int(time.time())
-
-    # Create event object with full schema fields
-    event_data = {
-        "schema_version": "1",
+    
+    # Map to Audit Service Event model
+    # Note: Audit Service expects structured fields: ts (ISO string), request_id, surface_id, principal, http, meta, event_hash
+    from datetime import datetime, timezone
+    ts_iso = datetime.now(timezone.utc).isoformat()
+    
+    # Prepare internal payload for Audit Service
+    # We follow the audit-service Event model
+    internal_payload = {
+        "schema_id": "talos.audit_event",
+        "schema_version": "v1",
         "event_id": event_id,
-        "timestamp": timestamp,
-        "cursor": derive_cursor(timestamp, event_id),
-        "event_type": event.event_type,
+        "ts": ts_iso,
+        "request_id": str(uuid.uuid4()),
+        "surface_id": "gateway-api",
         "outcome": "OK",
-        "session_id": str(uuid.uuid4()),  # Generate a session ID
-        "correlation_id": str(uuid.uuid4()),
-        "agent_id": event.actor,  # Map actor to agent_id
-        "peer_id": "",
-        "tool": "talos-gateway",
-        "method": event.action,
-        "resource": event.resource,
-        "metadata": event.metadata or {},
-        "metrics": {"latency_ms": 10},
-        "hashes": {
-            "request_hash": hash_port.canonical_hash({"raw": "mock"}).hex(),
-        },
-        "integrity": {
-            "proof_state": "UNVERIFIED",
-            "signature_state": "NOT_PRESENT",
-            "anchor_state": "NOT_ENABLED",
-            "verifier_version": "3.2",
-        },
+        "principal": {"id": event.actor, "type": "USER"},
+        "http": {"method": "POST", "path": "/api/events"},
+        "meta": {**(event.metadata or {}), "event_type": event.event_type},
+        "resource": {"type": "event", "id": event.resource or "n/a"},
+        "event_hash": "placeholder"
     }
+    
+    # Calculate canonical hash (RFC 8785 simulator)
+    import hashlib
+    import json
+    clean = {k: v for k, v in internal_payload.items() if k != "event_hash"}
+    canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    internal_payload["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    # Hash for integrity
-    integrity_hash = hash_port.canonical_hash(event_data).hex()
+    logger.info(f"Forwarding audit event {event_id} to {AUDIT_SERVICE_URL}/api/events/ingest")
+    
+    def forward():
+        return requests.post(
+            f"{AUDIT_SERVICE_URL}/api/events/ingest",
+            json=internal_payload,
+            timeout=5.0
+        )
 
-    # Store
-    class StoredEvent:
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    # Run blocking sync DB call in threadpool
-    await run_in_threadpool(audit_store.append, StoredEvent(**event_data, integrity_hash=integrity_hash))
-
-    # Broadcast to WS clients
-    # Note: In a real distributed system this would efficiently fan-out via Redis PubSub
-    # For now, local memory broadcast
-    task = asyncio.create_task(ws_manager.broadcast_event(event_data))
-    background_tasks.add(task)
-    task.add_done_callback(background_tasks.discard)
-
-    return AuditEventResponse(
-        event_id=event_id,
-        timestamp=timestamp,
-        event_type=event.event_type,
-        actor=event.actor,
-        action=event.action,
-        resource=event.resource,
-        integrity_hash=integrity_hash,
-    )
+    try:
+        res = await run_in_threadpool(forward)
+        if 200 <= res.status_code < 300:
+            AUDIT_FORWARD_SUCCESS.inc()
+            return AuditEventResponse(
+                event_id=event_id,
+                timestamp=timestamp,
+                event_type=event.event_type,
+                actor=event.actor,
+                action=event.action,
+                resource=event.resource,
+                integrity_hash=internal_payload["event_hash"],
+            )
+        else:
+            AUDIT_FORWARD_FAILURE.inc()
+            logger.error(f"Audit Service returned {res.status_code}: {res.text[:200]}")
+            return JSONResponse(
+                status_code=res.status_code,
+                content={"error": "Audit service rejection", "details": res.text[:100]}
+            )
+    except Exception as e:
+        AUDIT_FORWARD_FAILURE.inc()
+        logger.error(f"Failed to forward audit event: {e}")
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Audit Service Unavailable"}
+        )
 
 
 @app.get("/api/events")
@@ -605,58 +631,55 @@ async def emit_audit_event(
     outcome="OK",
     metadata=None,
 ):
-    # Re-use logic from create_event but internalized
+    """Internal side-effect audit emitter (Synchronous Proxy)."""
+    import logging
+    logger = logging.getLogger("gateway-audit-internal")
 
     ts = int(time.time())
-    eid = generate_uuid7()  # UUIDv7 for cursor compatibility
+    eid = generate_uuid7()
+    from datetime import datetime, timezone
+    ts_iso = datetime.now(timezone.utc).isoformat()
 
-    event_data = {
-        "schema_version": "1",
+    internal_payload = {
+        "schema_id": "talos.audit_event",
+        "schema_version": "v1",
         "event_id": eid,
-        "timestamp": ts,
-        "cursor": derive_cursor(ts, eid),
-        "event_type": event_type,
+        "ts": ts_iso,
+        "request_id": correlation_id,
+        "surface_id": "gateway-internal",
         "outcome": outcome,
-        "session_id": session_id,
-        "correlation_id": correlation_id,
-        "agent_id": agent_id,
-        "peer_id": "",
-        "tool": "talos-gateway",
-        "method": method,
-        "resource": resource,
-        "metadata": metadata or {},
-        "hashes": {"request_hash": hash_port.canonical_hash(metadata or {}).hex()},
-        "integrity": {
-            "proof_state": "UNVERIFIED",
-            "signature_state": "NOT_PRESENT",
-            "anchor_state": "NOT_ENABLED",
-            "verifier_version": "3.2",
-        },
+        "principal": {"id": agent_id, "type": "AGENT"},
+        "http": {"method": "INTERNAL", "path": method},
+        "meta": {**(metadata or {}), "session_id": session_id, "correlation_id": correlation_id, "event_type": event_type},
+        "resource": {"type": "tool", "id": resource or "n/a"},
+        "event_hash": "placeholder"
     }
 
-    # Hash for integrity
-    event_data["integrity_hash"] = hash_port.canonical_hash(event_data).hex()
+    # Calculate canonical hash
+    import hashlib
+    import json
+    clean = {k: v for k, v in internal_payload.items() if k != "event_hash"}
+    canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    internal_payload["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    # Store
-    # Use store.add (assuming InMemoryAuditStore supports it, or use append if list)
-    # Check if store is list or object
-    # InMemoryAuditStore (from bootstrap) likely has .add method
-    # Assuming run_in_threadpool(store.add, event_data) is correct per previous context
-    # But earlier I thought store was list.
-    # Check bootstrap.py? No time. Trusted add() in previous step.
-    # Reverting to store.add(event_data) but synchronosly if it's in memory list?
-    # If store is IAuditStorePort, it should be async or we wrap it.
-    # Let's assume store.add() exists.
-    
-    if hasattr(store, 'add'):
-        await run_in_threadpool(store.add, event_data)
-    else:
-        # Fallback if it's a list (Legacy hack)
-        class StoredEvent:
-            def __init__(self, **kwargs):
-                for k, v in kwargs.items():
-                    setattr(self, k, v)
-        store.append(StoredEvent(**event_data))
+    def forward():
+        return requests.post(
+            f"{AUDIT_SERVICE_URL}/api/events/ingest",
+            json=internal_payload,
+            timeout=5.0
+        )
 
-    # Broadcast (Async)
-    await ws_manager.broadcast_event(event_data)
+    try:
+        res = await run_in_threadpool(forward)
+        if 200 <= res.status_code < 300:
+            AUDIT_FORWARD_SUCCESS.inc()
+            logger.info(f"✅ Side-effect audit {eid} forwarded successfully")
+        else:
+            AUDIT_FORWARD_FAILURE.inc()
+            logger.error(f"❌ Side-effect audit {eid} failed with {res.status_code}")
+    except Exception as e:
+        AUDIT_FORWARD_FAILURE.inc()
+        logger.error(f"❌ Critical failure forwarding internal audit: {e}")
+
+    # Broadcast (Async) for local TUI/WS viewers
+    await ws_manager.broadcast_event(internal_payload)
