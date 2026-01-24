@@ -103,6 +103,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Read build-time metadata from environment
+GIT_SHA = os.getenv("GIT_SHA", "unknown")
+VERSION = os.getenv("VERSION", "unknown")
+BUILD_TIME = os.getenv("BUILD_TIME", "unknown")
+DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+TALOS_REGION = os.getenv("TALOS_REGION", "local")
+START_TIME = time.time()
+INSTANCE_ID = str(uuid.uuid4())
+AUDIT_SERVICE_URL = os.getenv("TALOS_AUDIT_URL", "http://talos-audit-service:8001")
+
 # Prometheus metrics
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -142,28 +152,6 @@ AUDIT_FORWARD_FAILURE = Counter(
     'Total audit events that failed to forward'
 )
 
-class PrometheusMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        start = time.time()
-        response = await call_next(request)
-        duration = time.time() - start
-        
-        REQUEST_COUNT.labels(
-            method=request.method,
-            endpoint=request.url.path,
-            status=response.status_code
-        ).inc()
-        
-        REQUEST_LATENCY.labels(
-            method=request.method,
-            endpoint=request.url.path
-        ).observe(duration)
-        
-        return response
-
-app.add_middleware(PrometheusMiddleware)
-
-
 class AuditEventCreate(BaseModel):
     """Request model for creating audit events."""
 
@@ -186,30 +174,28 @@ class AuditEventResponse(BaseModel):
     integrity_hash: str
 
 
-# Read build-time metadata from environment
-GIT_SHA = os.getenv("GIT_SHA", "unknown")
-VERSION = os.getenv("VERSION", "unknown")
-BUILD_TIME = os.getenv("BUILD_TIME", "unknown")
-DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
-START_TIME = time.time()
-INSTANCE_ID = str(uuid.uuid4())
-AUDIT_SERVICE_URL = os.getenv("TALOS_AUDIT_URL", "http://talos-audit-service:8001")
-
 # Schema version cache to avoid DB hammer
 from functools import lru_cache
 
 @lru_cache(maxsize=1)
 def _check_schema_version_cached(timestamp: int):
     """Cache schema check for 5 seconds to avoid DB hammer on readiness probes"""
-    # In production this would check actual DB schema version
-    # For now return placeholder
-    return "v1", "v1"
+    # In production this checks actual DB schema version
+    # Since we are using SDK ports, we assume the port check is successful if resolve() works.
+    try:
+        container = get_app_container()
+        store = container.resolve(IAuditStorePort)
+        # Simple probe: stats(0, now) - if it results in error, schema might be wrong.
+        store.stats(0, time.time())
+        return "v1", "v1"
+    except Exception:
+        return "unknown", "v1"
 
 
 @app.get("/healthz")
 def healthz():
     """Liveness probe - no dependency checks"""
-    return {"status": "ok"}
+    return {"status": "ok", "region": TALOS_REGION}
 
 
 @app.get("/readyz")
@@ -222,10 +208,10 @@ def readyz():
         if db_version != expected_version:
             return JSONResponse(
                 status_code=503,
-                content={"status": "not ready", "reason": f"Schema mismatch: {db_version} != {expected_version}"}
+                content={"status": "not ready", "reason": f"Schema mismatch: {db_version} != {expected_version}", "region": TALOS_REGION}
             )
     
-    return {"status": "ready", "dev_mode": DEV_MODE}
+    return {"status": "ready", "dev_mode": DEV_MODE, "region": TALOS_REGION}
 
 
 @app.get("/version")
@@ -240,23 +226,56 @@ def version():
     }
 
 
+def _get_metric_percentile(metric, percentile: float) -> float:
+    """Extract approximate percentile from Prometheus histogram buckets."""
+    try:
+        samples = metric.collect()[0].samples
+        buckets = []
+        total_count = 0
+        for s in samples:
+            if s.name.endswith("_bucket") and "le" in s.labels and s.labels["le"] != "+Inf":
+                buckets.append((float(s.labels["le"]), s.value))
+            elif s.name.endswith("_count"):
+                total_count = s.value
+        
+        if total_count == 0 or not buckets:
+            return 0.0
+            
+        buckets.sort()
+        target = total_count * percentile
+        prev_le = 0.0
+        prev_count = 0.0
+        for le, count in buckets:
+            if count >= target:
+                if count == prev_count: return le * 1000.0
+                ratio = (target - prev_count) / (count - prev_count)
+                return (prev_le + (le - prev_le) * ratio) * 1000.0
+            prev_le = le
+            prev_count = count
+        return buckets[-1][0] * 1000.0
+    except Exception:
+        return 0.0
+
 @app.get("/metrics/summary")
 def metrics_summary():
     """Summary metrics for TUI/Dashboard"""
+    # Extract total from counter
+    samples = REQUEST_COUNT.collect()[0].samples
+    total_reqs = sum(s.value for s in samples)
+    
     return {
-        "latency_p50_ms": 12.5,  # Mock for now
-        "latency_p95_ms": 45.2,
-        "connected_peers": 3,
-        "active_sessions": len(background_tasks)
+        "latency_p50_ms": round(_get_metric_percentile(REQUEST_LATENCY, 0.5), 2),
+        "latency_p95_ms": round(_get_metric_percentile(REQUEST_LATENCY, 0.95), 2),
+        "connected_peers": len(ws_manager.active_connections),
+        "active_sessions": len(background_tasks),
+        "total_requests": int(total_reqs)
     }
 
 
 @app.get("/metrics")
 async def metrics():
-    """Prometheus metrics endpoint"""
     # Update gauge metrics
     ACTIVE_SESSIONS.set(len(background_tasks))
-    
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -271,16 +290,17 @@ def health_check():
 def gateway_status():
     """Gateway status endpoint for integration tests."""
     uptime = int(time.time() - START_TIME)
+    total_reqs = sum(s.value for s in REQUEST_COUNT.collect()[0].samples)
     
     return {
         "schema_version": "1",
         "gateway_instance_id": INSTANCE_ID,
-        "status_seq": int(uptime / 10), # Pseudo sequence
+        "status_seq": int(uptime / 10), 
         "state": "RUNNING",
-        "version": "0.1.0",
+        "version": VERSION,
         "uptime_seconds": uptime,
-        "requests_processed": 0, # TODO: Expose from metrics
-        "tenants": 1,
+        "requests_processed": int(total_reqs),
+        "tenants": 1, # Dedicated single-tenant instance
         "cache": {
             "capability_cache_size": 0,
             "hits": 0,
@@ -288,7 +308,7 @@ def gateway_status():
             "evictions": 0
         },
         "sessions": {
-            "active_sessions": 0,
+            "active_sessions": len(ws_manager.active_connections) + len(background_tasks),
             "replay_rejections_1h": 0
         }
     }
@@ -361,7 +381,7 @@ async def create_event(event: AuditEventCreate):
                 actor=event.actor,
                 action=event.action,
                 resource=event.resource,
-                integrity_hash=internal_payload["event_hash"],
+                integrity_hash=str(internal_payload["event_hash"]),
             )
         else:
             AUDIT_FORWARD_FAILURE.inc()

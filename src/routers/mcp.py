@@ -1,5 +1,5 @@
 import os
-import requests
+import requests  # type: ignore
 import uuid
 from typing import Optional, Dict
 from fastapi import APIRouter, HTTPException, Depends, Header
@@ -7,11 +7,24 @@ from pydantic import BaseModel
 
 router = APIRouter(prefix="/v1/mcp", tags=["mcp"])
 
-# Configuration (MVP: Hardcoded or Env)
-# Registry maps server_id -> internal endpoint URL
+import hashlib
+import json
+import time
+from bootstrap import get_app_container
+from talos_sdk.ports.audit_store import IAuditStorePort  # type: ignore
+from src.auth import require_auth, verify_token_header
+
+# Configuration
+# Default to cluster-local DNS for MCP Connector
+DEFAULT_CONNECTOR_URL = os.getenv("MCP_CONNECTOR_URL", "http://talos-mcp-connector:8082")
+
 MCP_REGISTRY = {
-    "git": os.getenv("MCP_GIT_URL", "http://localhost:8082"),
-    "weather": os.getenv("MCP_WEATHER_URL", "http://localhost:8082")
+    # 'git' and 'weather' are served by the same connector for MVP
+    "git": DEFAULT_CONNECTOR_URL,
+    "weather": DEFAULT_CONNECTOR_URL,
+    # Allow dynamic extension via env
+    **{k.replace("MCP_SERVER_", "").lower(): v 
+       for k, v in os.environ.items() if k.startswith("MCP_SERVER_")}
 }
 
 # --- Models ---
@@ -24,26 +37,19 @@ class ToolCallResponse(BaseModel):
     error: Optional[Dict] = None
 
 # --- Helpers ---
-def verify_token(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    # MVP: Check for "Bearer <token>"
-    token = authorization.split(" ")[1] if " " in authorization else authorization
-    # TODO: Verify token against Identity/Auth service
-    if token == "invalid-token":
-        raise HTTPException(status_code=403, detail="Invalid token")
-    return token
-
 def get_upstream_url(server_id: str) -> str:
     url = MCP_REGISTRY.get(server_id)
     if not url:
         raise HTTPException(status_code=404, detail=f"Server '{server_id}' not found in gateway registry")
     return url
 
+def _compute_hash(data: Dict) -> str:
+    return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
 # --- Routes ---
 
 @router.get("/servers")
-def list_servers(token: str = Depends(verify_token)):
+def list_servers(token: str = Depends(verify_token_header)):
     """List available MCP servers (gated by capability)."""
     # MVP: Return static registry
     servers = []
@@ -57,7 +63,8 @@ def list_servers(token: str = Depends(verify_token)):
     return {"servers": servers}
 
 @router.get("/servers/{server_id}/tools")
-def list_tools(server_id: str, token: str = Depends(verify_token)):
+@router.get("/servers/{server_id}/tools")
+def list_tools(server_id: str, token: str = Depends(verify_token_header)):
     """List tools for a specific server (proxied)."""
     base_url = get_upstream_url(server_id)
     
@@ -92,7 +99,7 @@ def list_tools(server_id: str, token: str = Depends(verify_token)):
         raise HTTPException(status_code=502, detail=f"Failed to fetch tools: {str(e)}")
 
 @router.get("/servers/{server_id}/tools/{tool_name}/schema")
-def get_tool_schema(server_id: str, tool_name: str, token: str = Depends(verify_token)):
+def get_tool_schema(server_id: str, tool_name: str, token: str = Depends(verify_token_header)):
     """Get schema for a specific tool."""
     # Optimization: Call list_tools and filter
     # Or strict upstream call if supported.
@@ -108,19 +115,54 @@ def get_tool_schema(server_id: str, tool_name: str, token: str = Depends(verify_
                 "server_id": server_id,
                 "tool_name": tool_name,
                 "json_schema": t.get("inputSchema", {}),
-                "schema_hash": "mock-hash", # TODO: Compute
+                "schema_hash": _compute_hash(t.get("inputSchema", {})),
                 "version": "1.0.0"
             }
             
     raise HTTPException(status_code=404, detail="Tool not found")
 
 @router.post("/servers/{server_id}/tools/{tool_name}:call")
-def call_tool(server_id: str, tool_name: str, req: ToolCallRequest, token: str = Depends(verify_token)):
+def call_tool(server_id: str, tool_name: str, req: ToolCallRequest, token: str = Depends(verify_token_header)):
     """Invoke a tool (proxied)."""
     base_url = get_upstream_url(server_id)
     
-    # Audit Log (Placeholder - integrate with IAuditStorePort if accessible)
-    # print(f"AUDIT: Invoking {server_id}/{tool_name} by {token[:8]}...")
+    
+    # Live Audit Log
+    try:
+        container = get_app_container()
+        store = container.resolve(IAuditStorePort)
+        
+        # We construct a basic event. In a full system, we'd use 'AuditEventCreate' model
+        # and rely on the Audit Store's structured logging.
+        # But 'append' takes an AuditEvent protocol.
+        # Minimal object satisfying Protocol:
+        class AuditEntry:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+                
+        event = AuditEntry(
+            event_id=str(uuid.uuid4()),
+            timestamp=time.time(),
+            # Required fields for Postgres store:
+            cursor=None, # Auto-assigned by store usually, or optional in append
+            event_type="mcp_tool_call",
+            outcome="PENDING",
+            session_id="gateway-mcp",
+            correlation_id=str(uuid.uuid4()),
+            agent_id="user", # Derived from token in real implementation
+            tool=tool_name,
+            method="call",
+            resource=server_id,
+            metadata={"input_keys": list(req.input.keys())},
+            metrics={},
+            hashes={},
+            integrity={},
+            integrity_hash=""
+        )
+        store.append(event)
+    except Exception as e:
+        # Non-blocking audit failure
+        print(f"WARN: Failed to audit tool call: {e}")
     
     payload = {
         "jsonrpc": "2.0",
