@@ -213,7 +213,38 @@ def _check_schema_version_cached(timestamp: int):
 @app.get("/healthz")
 def healthz():
     """Liveness probe - no dependency checks"""
-    return {"status": "ok", "region": TALOS_REGION}
+    return {
+        "status": "ok",
+        "region": TALOS_REGION,
+        "version": VERSION,
+        "uptime": time.time() - START_TIME
+    }
+
+@app.get("/health/ollama")
+async def health_ollama():
+    """Proxy health check to Ollama backend."""
+    url = os.getenv("OLLAMA_URL", "http://ollama:11434")
+    try:
+        # Pydantic fetch is slow here, use requests or httpx.
+        # Using requests for consistency with other parts of gateway.
+        resp = requests.get(f"{url}/api/tags", timeout=2)
+        if resp.status_code == 200:
+            return {"status": "online"}
+        return JSONResponse(status_code=503, content={"status": "offline", "error": f"Ollama returned {resp.status_code}"})
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"status": "offline", "error": str(e)})
+
+@app.get("/health/tga")
+async def health_tga():
+    """Proxy health check to Governance Agent."""
+    url = os.getenv("TGA_URL", "http://talos-governance-agent:8083")
+    try:
+        resp = requests.get(f"{url}/health", timeout=2)
+        if resp.status_code == 200:
+            return {"status": "online"}
+        return JSONResponse(status_code=503, content={"status": "offline", "error": f"TGA returned {resp.status_code}"})
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"status": "offline", "error": str(e)})
 
 
 @app.get("/readyz")
