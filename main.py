@@ -21,7 +21,10 @@ from dotenv import load_dotenv
 # Load environment variables from .env
 load_dotenv()
 
-DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+# Initialize Configuration
+from src.config import settings
+
+DEV_MODE = settings.dev_mode
 
 
 # Import WS Handler and Manager
@@ -41,6 +44,8 @@ if not has_upstreams:
         sys.exit(2)
     else:
         print("WARNING: Running in Dev Mode without upstreams. Mocking is disabled.")
+
+print(f"Startup Config | Contracts: {settings.contracts_version} | Config: {settings.config_version} | Digest: {settings.config_digest[:8]}...")
 
 from bootstrap import get_app_container
 from talos_sdk.ports.audit_store import IAuditStorePort  # type: ignore
@@ -126,10 +131,10 @@ GIT_SHA = os.getenv("GIT_SHA", "unknown")
 VERSION = os.getenv("VERSION", "unknown")
 BUILD_TIME = os.getenv("BUILD_TIME", "unknown")
 # DEV_MODE already initialized above
-TALOS_REGION = os.getenv("TALOS_REGION", "local")
+TALOS_REGION = settings.region
 START_TIME = time.time()
 INSTANCE_ID = str(uuid.uuid4())
-AUDIT_SERVICE_URL = os.getenv("TALOS_AUDIT_URL", "http://talos-audit-service:8001")
+AUDIT_SERVICE_URL = settings.audit_url
 
 # Prometheus metrics
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST  # type: ignore

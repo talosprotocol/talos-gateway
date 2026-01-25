@@ -11,6 +11,7 @@ RUN apt-get update && \
 
 COPY sdks/python /build/sdks/python
 COPY contracts/python /build/contracts/python
+COPY libs/talos-config /build/libs/talos-config
 COPY services/gateway/requirements.txt .
 COPY services/governance-agent /build/services/governance-agent
 
@@ -18,6 +19,7 @@ RUN pip wheel --no-cache-dir --wheel-dir /wheels \
     -r requirements.txt \
     /build/sdks/python \
     /build/contracts/python \
+    /build/libs/talos-config \
     /build/services/governance-agent
 
 # ========================================
