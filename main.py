@@ -21,10 +21,26 @@ from dotenv import load_dotenv
 # Load environment variables from .env
 load_dotenv()
 
+DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+
 
 # Import WS Handler and Manager
 from src.handlers import stream
 from src.stream.manager import manager as ws_manager
+from src.routers.mcp import MCP_REGISTRY  # Import registry to check for upstreams
+import sys
+
+# Fail-Closed Configuration Check
+# Must have at least one upstream tool server configured, or a dynamic config source
+TOOL_SERVER_CONFIG_SOURCE = os.getenv("TOOL_SERVER_CONFIG_SOURCE", "")
+has_upstreams = len(MCP_REGISTRY) > 0 or TOOL_SERVER_CONFIG_SOURCE in {"file", "http", "k8s"}
+
+if not has_upstreams:
+    if not DEV_MODE:
+        print("CRITICAL: No upstream tool servers configured in Production Mode. Exiting.")
+        sys.exit(2)
+    else:
+        print("WARNING: Running in Dev Mode without upstreams. Mocking is disabled.")
 
 from bootstrap import get_app_container
 from talos_sdk.ports.audit_store import IAuditStorePort  # type: ignore
@@ -42,8 +58,10 @@ TOOL_CHAT = "chat"
 
 class ConnectorError(Exception):
     """Custom exception for connector failures."""
-
     pass
+
+
+
 
 
 # UUIDv7 generator for Python < 3.13 compatibility
@@ -107,7 +125,7 @@ app.add_middleware(
 GIT_SHA = os.getenv("GIT_SHA", "unknown")
 VERSION = os.getenv("VERSION", "unknown")
 BUILD_TIME = os.getenv("BUILD_TIME", "unknown")
-DEV_MODE = os.getenv("DEV_MODE", "false").lower() == "true"
+# DEV_MODE already initialized above
 TALOS_REGION = os.getenv("TALOS_REGION", "local")
 START_TIME = time.time()
 INSTANCE_ID = str(uuid.uuid4())
@@ -351,7 +369,7 @@ async def create_event(event: AuditEventCreate):
         "http": {"method": "POST", "path": "/api/events"},
         "meta": {**(event.metadata or {}), "event_type": event.event_type},
         "resource": {"type": "event", "id": event.resource or "n/a"},
-        "event_hash": "placeholder"
+        "event_hash": ""
     }
     
     # Calculate canonical hash (RFC 8785 simulator)
@@ -672,7 +690,7 @@ async def emit_audit_event(
         "http": {"method": "INTERNAL", "path": method},
         "meta": {**(metadata or {}), "session_id": session_id, "correlation_id": correlation_id, "event_type": event_type},
         "resource": {"type": "tool", "id": resource or "n/a"},
-        "event_hash": "placeholder"
+        "event_hash": ""
     }
 
     # Calculate canonical hash

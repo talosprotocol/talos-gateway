@@ -19,9 +19,6 @@ from src.auth import require_auth, verify_token_header
 DEFAULT_CONNECTOR_URL = os.getenv("MCP_CONNECTOR_URL", "http://talos-mcp-connector:8082")
 
 MCP_REGISTRY = {
-    # 'git' and 'weather' are served by the same connector for MVP
-    "git": DEFAULT_CONNECTOR_URL,
-    "weather": DEFAULT_CONNECTOR_URL,
     # Allow dynamic extension via env
     **{k.replace("MCP_SERVER_", "").lower(): v 
        for k, v in os.environ.items() if k.startswith("MCP_SERVER_")}

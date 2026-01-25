@@ -6,17 +6,19 @@ FROM python:3.11-slim AS builder
 WORKDIR /build
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc && \
+    apt-get install -y --no-install-recommends gcc libgmp-dev python3-dev && \
     rm -rf /var/lib/apt/lists/*
 
 COPY sdks/python /build/sdks/python
 COPY contracts/python /build/contracts/python
 COPY services/gateway/requirements.txt .
+COPY services/governance-agent /build/services/governance-agent
 
 RUN pip wheel --no-cache-dir --wheel-dir /wheels \
     -r requirements.txt \
     /build/sdks/python \
-    /build/contracts/python
+    /build/contracts/python \
+    /build/services/governance-agent
 
 # ========================================
 # Runtime Stage
