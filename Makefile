@@ -1,7 +1,7 @@
 # talos-gateway Makefile
 # FastAPI Gateway Service
 
-.PHONY: install build test lint clean start stop status
+.PHONY: install build test lint clean start stop status typecheck
 
 SERVICE_NAME := talos-gateway
 PID_FILE := /tmp/$(SERVICE_NAME).pid
@@ -70,3 +70,6 @@ clean:
 	find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 	find . -name "*.pyc" -delete 2>/dev/null || true
 	@echo "Clean complete. Ready for fresh build."
+
+typecheck:
+	@echo "Typecheck not implemented for $(SERVICE_NAME)"
