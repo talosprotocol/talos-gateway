@@ -46,7 +46,7 @@ Evaluation: N/A for this repo (See: `talos-dashboard` for network stats).
 
 ### Common Workflows
 
-1.  **Connect Client**: POST to `/api/v1/message`.
+1. **Connect Client**: POST to `/api/v1/message`.
 
 ## Operational Interface
 
@@ -56,18 +56,13 @@ Evaluation: N/A for this repo (See: `talos-dashboard` for network stats).
 ## Security Considerations
 
 - **Threat Model**: Public-facing ingress point.
-- **Guarantees**:
-  - **Rate Limiting**: Per-IP and per-key limits.
+- **Rate Limiting**: Per-IP and per-key limits.
 
 ## References
 
-1.  [Talos Wiki](https://github.com/talosprotocol/talos/wiki)
-2.  [Architecture](https://github.com/talosprotocol/talos/wiki/Architecture)
+1. [Talos Wiki](https://github.com/talosprotocol/talos/wiki)
+2. [Architecture](https://github.com/talosprotocol/talos/wiki/Architecture)
 
 ## License
-
-Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
-
-Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
