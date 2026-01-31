@@ -8,13 +8,13 @@ import uuid
 import base64
 import os
 import struct
-import requests  # type: ignore
+import requests
+from typing import Any, Dict, List, Optional, Union, cast, Type, Iterable, Set
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
-from typing import Optional, Set, Any
 import asyncio
 from dotenv import load_dotenv
 
@@ -48,11 +48,11 @@ if not has_upstreams:
 print(f"Startup Config | Contracts: {settings.contracts_version} | Config: {settings.config_version} | Digest: {settings.config_digest[:8]}...")
 
 from bootstrap import get_app_container
-from talos_sdk.ports.audit_store import IAuditStorePort  # type: ignore
-from talos_sdk.ports.hash import IHashPort  # type: ignore
+from talos_sdk.ports.audit_store import IAuditStorePort
+from talos_sdk.ports.hash import IHashPort
 
 # Import derive_cursor from canonical contracts (boundary purity)
-from talos_contracts import derive_cursor  # type: ignore
+from talos_contracts import derive_cursor
 
 
 # Global background tasks reference
@@ -137,7 +137,7 @@ INSTANCE_ID = str(uuid.uuid4())
 AUDIT_SERVICE_URL = settings.audit_url
 
 # Prometheus metrics
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST  # type: ignore
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import Response
 
@@ -182,7 +182,7 @@ class AuditEventCreate(BaseModel):
     actor: str
     action: str
     resource: Optional[str] = None
-    metadata: Optional[dict] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class AuditEventResponse(BaseModel):
@@ -201,22 +201,22 @@ class AuditEventResponse(BaseModel):
 from functools import lru_cache
 
 @lru_cache(maxsize=1)
-def _check_schema_version_cached(timestamp: int):
+def _check_schema_version_cached(timestamp: int) -> tuple[str, str]:
     """Cache schema check for 5 seconds to avoid DB hammer on readiness probes"""
     # In production this checks actual DB schema version
     # Since we are using SDK ports, we assume the port check is successful if resolve() works.
     try:
         container = get_app_container()
-        store = container.resolve(IAuditStorePort)
+        store = container.resolve(cast(Any, IAuditStorePort))
         # Simple probe: stats(0, now) - if it results in error, schema might be wrong.
-        store.stats(0, time.time())
+        store.stats(TimeRange(start=0, end=time.time()))
         return "v1", "v1"
     except Exception:
         return "unknown", "v1"
 
 
 @app.get("/healthz")
-def healthz():
+def healthz() -> Dict[str, Any]:
     """Liveness probe - no dependency checks"""
     return {
         "status": "ok",
@@ -226,7 +226,7 @@ def healthz():
     }
 
 @app.get("/health/ollama")
-async def health_ollama():
+async def health_ollama() -> Union[Dict[str, Any], JSONResponse]:
     """Proxy health check to Ollama backend."""
     url = os.getenv("OLLAMA_URL", "http://ollama:11434")
     try:
@@ -240,7 +240,7 @@ async def health_ollama():
         return JSONResponse(status_code=503, content={"status": "offline", "error": str(e)})
 
 @app.get("/health/tga")
-async def health_tga():
+async def health_tga() -> Union[Dict[str, Any], JSONResponse]:
     """Proxy health check to Governance Agent."""
     url = os.getenv("TGA_URL", "http://talos-governance-agent:8083")
     try:
@@ -253,7 +253,7 @@ async def health_tga():
 
 
 @app.get("/readyz")
-def readyz():
+def readyz() -> Union[Dict[str, Any], JSONResponse]:
     """Readiness probe - checks critical dependencies"""
     if not DEV_MODE:
         # Use cached check to avoid DB hammer
@@ -269,7 +269,7 @@ def readyz():
 
 
 @app.get("/version")
-def version():
+def version() -> Dict[str, Any]:
     """Version information endpoint"""
     return {
         "version": VERSION,
@@ -280,10 +280,10 @@ def version():
     }
 
 
-def _get_metric_percentile(metric, percentile: float) -> float:
+def _get_metric_percentile(metric: Any, percentile: float) -> float:
     """Extract approximate percentile from Prometheus histogram buckets."""
     try:
-        samples = metric.collect()[0].samples
+        samples = list(metric.collect())[0].samples
         buckets = []
         total_count = 0
         for s in samples:
@@ -303,18 +303,18 @@ def _get_metric_percentile(metric, percentile: float) -> float:
             if count >= target:
                 if count == prev_count: return le * 1000.0
                 ratio = (target - prev_count) / (count - prev_count)
-                return (prev_le + (le - prev_le) * ratio) * 1000.0
+                return float((prev_le + (le - prev_le) * ratio) * 1000.0)
             prev_le = le
             prev_count = count
-        return buckets[-1][0] * 1000.0
+        return float(buckets[-1][0] * 1000.0)
     except Exception:
         return 0.0
 
 @app.get("/metrics/summary")
-def metrics_summary():
+def metrics_summary() -> Dict[str, Any]:
     """Summary metrics for TUI/Dashboard"""
     # Extract total from counter
-    samples = REQUEST_COUNT.collect()[0].samples
+    samples = list(REQUEST_COUNT.collect())[0].samples
     total_reqs = sum(s.value for s in samples)
     
     return {
@@ -327,7 +327,7 @@ def metrics_summary():
 
 
 @app.get("/metrics")
-async def metrics():
+async def metrics() -> Response:
     # Update gauge metrics
     ACTIVE_SESSIONS.set(len(background_tasks))
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
@@ -335,16 +335,16 @@ async def metrics():
 
 # Deprecated /health endpoint for backward compatibility
 @app.get("/health")
-def health_check():
+def health_check() -> Dict[str, Any]:
     """Health check endpoint (deprecated, use /healthz)"""
     return {"status": "ok", "timestamp": time.time()}
 
 
 @app.get("/api/gateway/status")
-def gateway_status():
+def gateway_status() -> Dict[str, Any]:
     """Gateway status endpoint for integration tests."""
     uptime = int(time.time() - START_TIME)
-    total_reqs = sum(s.value for s in REQUEST_COUNT.collect()[0].samples)
+    total_reqs = sum(s.value for s in list(REQUEST_COUNT.collect())[0].samples)
     
     return {
         "schema_version": "1",
@@ -369,7 +369,7 @@ def gateway_status():
 
 
 @app.post("/api/events", response_model=AuditEventResponse)
-async def create_event(event: AuditEventCreate):
+async def create_event(event: AuditEventCreate) -> Union[AuditEventResponse, JSONResponse]:
     """Create a new audit event (Proxies to Audit Service)."""
     # Patch 2: Lock down boundary
     if not DEV_MODE:
@@ -417,7 +417,7 @@ async def create_event(event: AuditEventCreate):
 
     logger.info(f"Forwarding audit event {event_id} to {AUDIT_SERVICE_URL}/api/events/ingest")
     
-    def forward():
+    def forward() -> requests.Response:
         return requests.post(
             f"{AUDIT_SERVICE_URL}/api/events/ingest",
             json=internal_payload,
@@ -460,10 +460,10 @@ def list_events(
     session_id: Optional[str] = None,
     correlation_id: Optional[str] = None,
     outcome: Optional[str] = None
-):
+) -> Dict[str, Any]:
     """List recent audit events with filters."""
     container = get_app_container()
-    audit_store = container.resolve(IAuditStorePort)
+    audit_store = container.resolve(cast(Any, IAuditStorePort))
 
     filters = {}
     if session_id: filters["session_id"] = session_id
@@ -510,16 +510,23 @@ def list_events(
     }
 
 
+class TimeRange(BaseModel):
+    """Time window for stats query."""
+    start: float
+    end: float
+
 @app.get("/api/events/stats")
 def get_event_stats(
     from_ts: float = Query(..., alias="from"), 
     to_ts: float = Query(..., alias="to")
-):
+) -> Dict[str, Any]:
     """Get audit statistics."""
     container = get_app_container()
-    audit_store = container.resolve(IAuditStorePort)
+    audit_store = container.resolve(cast(Any, IAuditStorePort))
     
-    return audit_store.stats(from_ts, to_ts)
+    window = TimeRange(start=from_ts, end=to_ts)
+    stats = audit_store.stats(window)
+    return {"count": stats.count}
 
 
 # In-memory session store for MVP
@@ -529,7 +536,7 @@ sessions = {}
 class ChatRequest(BaseModel):
     session_id: str
     model: str
-    messages: list[dict]
+    messages: List[Dict[str, Any]]
     capability: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 512
@@ -554,7 +561,7 @@ def verify_capability(req: ChatRequest) -> bool:
     )
 
 
-def invoke_connector_chat(req: ChatRequest, correlation_id: str) -> dict:
+def invoke_connector_chat(req: ChatRequest, correlation_id: str) -> Dict[str, Any]:
     """Low-level connector invocation."""
     invoke_payload = {
         "method": "tools/call",
@@ -581,15 +588,15 @@ def invoke_connector_chat(req: ChatRequest, correlation_id: str) -> dict:
     if res.status_code != 200:
         raise ConnectorError(f"Connector returned {res.status_code}")
 
-    return res.json()
+    return dict(res.json())
 
 
 @app.post("/mcp/tools/chat")
-async def chat_tool(req: ChatRequest):
+async def chat_tool(req: ChatRequest) -> Union[Dict[str, Any], JSONResponse]:
     """Secure, audited chat tool endpoint."""
     container = get_app_container()
-    audit_store = container.resolve(IAuditStorePort)
-    hash_port = container.resolve(IHashPort)
+    audit_store = container.resolve(cast(Any, IAuditStorePort))
+    hash_port = container.resolve(cast(Any, IHashPort))
     # ws_manager is imported globally
 
     correlation_id = req.client_request_id or str(uuid.uuid4())
@@ -673,7 +680,9 @@ async def chat_tool(req: ChatRequest):
 
         if mcp_res.get("error"):
             return JSONResponse(status_code=500, content=mcp_res["error"])
-        return mcp_res["result"]
+        # Ensure strict Dict return
+        result: Dict[str, Any] = mcp_res.get("result", {}) or {}
+        return result
 
     except Exception as e:
         await emit_audit_event(
@@ -693,18 +702,18 @@ async def chat_tool(req: ChatRequest):
 
 
 async def emit_audit_event(
-    store,
-    hash_port,
-    ws_manager, 
-    event_type,
-    correlation_id,
-    session_id,
-    agent_id,
-    method,
-    resource,
-    outcome="OK",
-    metadata=None,
-):
+    store: IAuditStorePort,
+    hash_port: IHashPort,
+    ws_manager: Any, 
+    event_type: str,
+    correlation_id: str,
+    session_id: str,
+    agent_id: str,
+    method: str,
+    resource: str,
+    outcome: str = "OK",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
     """Internal side-effect audit emitter (Synchronous Proxy)."""
     import logging
     logger = logging.getLogger("gateway-audit-internal")
@@ -736,7 +745,7 @@ async def emit_audit_event(
     canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     internal_payload["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-    def forward():
+    def forward() -> requests.Response:
         return requests.post(
             f"{AUDIT_SERVICE_URL}/api/events/ingest",
             json=internal_payload,

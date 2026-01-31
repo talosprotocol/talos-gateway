@@ -9,7 +9,18 @@ dependencies = [
     "uvicorn",
     "pydantic",
     "requests",
+    "prometheus-client",
     "talos-sdk-py @ git+https://github.com/talosprotocol/talos-sdk-py.git"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "httpx",
+    "mypy",
+    "types-requests",
+    "types-redis",
+    "types-PyYAML"
 ]
 
 [tool.setuptools]
@@ -22,3 +33,10 @@ target-version = "py310"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+mypy_path = "../../sdks/python/src:../../contracts/python"
+explicit_package_bases = true
+namespace_packages = true

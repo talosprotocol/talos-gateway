@@ -1,7 +1,7 @@
 import os
-import requests  # type: ignore
+import requests
 import uuid
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, cast
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 
@@ -11,7 +11,7 @@ import hashlib
 import json
 import time
 from bootstrap import get_app_container
-from talos_sdk.ports.audit_store import IAuditStorePort  # type: ignore
+from talos_sdk.ports.audit_store import IAuditStorePort
 from src.auth import require_auth, verify_token_header
 
 # Configuration
@@ -26,12 +26,12 @@ MCP_REGISTRY = {
 
 # --- Models ---
 class ToolCallRequest(BaseModel):
-    input: Dict
+    input: Dict[str, Any]
 
 class ToolCallResponse(BaseModel):
     request_id: str
-    output: Dict
-    error: Optional[Dict] = None
+    output: Dict[str, Any]
+    error: Optional[Dict[str, Any]] = None
 
 # --- Helpers ---
 def get_upstream_url(server_id: str) -> str:
@@ -40,13 +40,13 @@ def get_upstream_url(server_id: str) -> str:
         raise HTTPException(status_code=404, detail=f"Server '{server_id}' not found in gateway registry")
     return url
 
-def _compute_hash(data: Dict) -> str:
+def _compute_hash(data: Dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 # --- Routes ---
 
 @router.get("/servers")
-def list_servers(token: str = Depends(verify_token_header)):
+def list_servers(token: str = Depends(verify_token_header)) -> Dict[str, Any]:
     """List available MCP servers (gated by capability)."""
     # MVP: Return static registry
     servers = []
@@ -61,7 +61,7 @@ def list_servers(token: str = Depends(verify_token_header)):
 
 @router.get("/servers/{server_id}/tools")
 @router.get("/servers/{server_id}/tools")
-def list_tools(server_id: str, token: str = Depends(verify_token_header)):
+def list_tools(server_id: str, token: str = Depends(verify_token_header)) -> Dict[str, Any]:
     """List tools for a specific server (proxied)."""
     base_url = get_upstream_url(server_id)
     
@@ -96,7 +96,7 @@ def list_tools(server_id: str, token: str = Depends(verify_token_header)):
         raise HTTPException(status_code=502, detail=f"Failed to fetch tools: {str(e)}")
 
 @router.get("/servers/{server_id}/tools/{tool_name}/schema")
-def get_tool_schema(server_id: str, tool_name: str, token: str = Depends(verify_token_header)):
+def get_tool_schema(server_id: str, tool_name: str, token: str = Depends(verify_token_header)) -> Dict[str, Any]:
     """Get schema for a specific tool."""
     # Optimization: Call list_tools and filter
     # Or strict upstream call if supported.
@@ -119,7 +119,7 @@ def get_tool_schema(server_id: str, tool_name: str, token: str = Depends(verify_
     raise HTTPException(status_code=404, detail="Tool not found")
 
 @router.post("/servers/{server_id}/tools/{tool_name}:call")
-def call_tool(server_id: str, tool_name: str, req: ToolCallRequest, token: str = Depends(verify_token_header)):
+def call_tool(server_id: str, tool_name: str, req: ToolCallRequest, token: str = Depends(verify_token_header)) -> Dict[str, Any]:
     """Invoke a tool (proxied)."""
     base_url = get_upstream_url(server_id)
     
@@ -127,17 +127,17 @@ def call_tool(server_id: str, tool_name: str, req: ToolCallRequest, token: str =
     # Live Audit Log
     try:
         container = get_app_container()
-        store = container.resolve(IAuditStorePort)
+        store = container.resolve(cast(Any, IAuditStorePort))
         
         # We construct a basic event. In a full system, we'd use 'AuditEventCreate' model
         # and rely on the Audit Store's structured logging.
         # But 'append' takes an AuditEvent protocol.
         # Minimal object satisfying Protocol:
         class AuditEntry:
-            def __init__(self, **kwargs):
+            def __init__(self, **kwargs: Any) -> None:
                 self.__dict__.update(kwargs)
                 
-        event = AuditEntry(
+        event: Any = AuditEntry(
             event_id=str(uuid.uuid4()),
             timestamp=time.time(),
             # Required fields for Postgres store:

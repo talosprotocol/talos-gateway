@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
-from typing import Any
+from typing import Any, cast, Dict
 import os
 import time
 from bootstrap import get_app_container
@@ -9,7 +9,7 @@ from src.auth import require_auth, is_dev_mode
 router = APIRouter(prefix="/admin/v1", tags=["admin"])
 
 @router.get("/me")
-async def get_current_user(_: Any = Depends(require_auth)):
+async def get_current_user(_: Any = Depends(require_auth)) -> Dict[str, Any]:
     """
     Get current user profile.
     
@@ -31,7 +31,7 @@ async def get_current_user(_: Any = Depends(require_auth)):
     }
 
 @router.get("/secrets")
-async def list_secrets(_: Any = Depends(require_auth)):
+async def list_secrets(_: Any = Depends(require_auth)) -> Dict[str, Any]:
     """
     List secret keys (metadata only, not values).
     
@@ -65,7 +65,7 @@ async def list_secrets(_: Any = Depends(require_auth)):
 async def telemetry_stats(
     window_hours: int = 24,
     _: Any = Depends(require_auth)
-):
+) -> Dict[str, Any]:
     """
     Get telemetry statistics for time window.
     
@@ -79,7 +79,7 @@ async def telemetry_stats(
     Get telemetry statistics for time window.
     """
     container = get_app_container()
-    store = container.resolve(IAuditStorePort)
+    store = container.resolve(cast(Any, IAuditStorePort))
     
     # Calculate window
     now = time.time()
@@ -102,7 +102,7 @@ async def telemetry_stats(
 async def audit_stats(
     window_hours: int = 24,
     _: Any = Depends(require_auth)
-):
+) -> Any:
     """
     Get audit event statistics for time window.
     
@@ -116,7 +116,7 @@ async def audit_stats(
     Get audit event statistics for time window.
     """
     container = get_app_container()
-    store = container.resolve(IAuditStorePort)
+    store = container.resolve(cast(Any, IAuditStorePort))
     
     # Calculate window
     now = time.time()
