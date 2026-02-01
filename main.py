@@ -3,35 +3,44 @@ Talos Gateway - FastAPI Application
 Exposes REST API for audit events and integrity verification.
 """
 
-import time
-import uuid
-import base64
+import asyncio
+import hashlib
+import json
+import logging
 import os
 import struct
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Set, Union, cast
+
 import requests
-from typing import Any, Dict, List, Optional, Union, cast, Type, Iterable, Set
-from fastapi import FastAPI, Query
+from bootstrap import get_app_container
+from dotenv import load_dotenv
+from fastapi import FastAPI, Query, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.concurrency import run_in_threadpool
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel
-import asyncio
-from dotenv import load_dotenv
+from src.config import settings
+from src.handlers import stream
+from src.routers import admin, mcp
+from src.routers.mcp import MCP_REGISTRY
+from src.stream.manager import manager as ws_manager
+from talos_sdk.ports.audit_store import IAuditStorePort
+from talos_sdk.ports.hash import IHashPort
 
+# Configure Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("talos-gateway")
+# Initialize Configuration
 # Load environment variables from .env
 load_dotenv()
 
-# Initialize Configuration
-from src.config import settings
-
 DEV_MODE = settings.dev_mode
-
-
-# Import WS Handler and Manager
-from src.handlers import stream
-from src.stream.manager import manager as ws_manager
-from src.routers.mcp import MCP_REGISTRY  # Import registry to check for upstreams
-import sys
 
 # Fail-Closed Configuration Check
 # Must have at least one upstream tool server configured, or a dynamic config source
@@ -45,14 +54,11 @@ if not has_upstreams:
     else:
         print("WARNING: Running in Dev Mode without upstreams. Mocking is disabled.")
 
-print(f"Startup Config | Contracts: {settings.contracts_version} | Config: {settings.config_version} | Digest: {settings.config_digest[:8]}...")
+print(
+    f"Startup Config | Contracts: {settings.contracts_version} | Config: {settings.config_version} | Digest: {settings.config_digest[:8]}..."
+)
 
-from bootstrap import get_app_container
-from talos_sdk.ports.audit_store import IAuditStorePort
-from talos_sdk.ports.hash import IHashPort
-
-# Import derive_cursor from canonical contracts (boundary purity)
-from talos_contracts import derive_cursor
+# Fail-Closed Configuration Check
 
 
 # Global background tasks reference
@@ -60,13 +66,10 @@ background_tasks: Set[asyncio.Task[Any]] = set()
 TOOL_CHAT = "chat"
 
 
-
 class ConnectorError(Exception):
     """Custom exception for connector failures."""
+
     pass
-
-
-
 
 
 # UUIDv7 generator for Python < 3.13 compatibility
@@ -110,12 +113,7 @@ app = FastAPI(
 
 # Register WS Router
 app.include_router(stream.router)
-
-from src.routers import mcp
 app.include_router(mcp.router)
-
-# Register Admin Router
-from src.routers import admin
 app.include_router(admin.router)
 
 app.add_middleware(
@@ -137,43 +135,29 @@ INSTANCE_ID = str(uuid.uuid4())
 AUDIT_SERVICE_URL = settings.audit_url
 
 # Prometheus metrics
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from starlette.middleware.base import BaseHTTPMiddleware
-from fastapi.responses import Response
-
 # Custom metrics
 REQUEST_COUNT = Counter(
-    'gateway_requests_total',
-    'Total requests',
-    ['method', 'endpoint', 'status']
+    "gateway_requests_total", "Total requests", ["method", "endpoint", "status"]
 )
 
 REQUEST_LATENCY = Histogram(
-    'gateway_request_duration_seconds',
-    'Request latency in seconds',
-    ['method', 'endpoint']
+    "gateway_request_duration_seconds", "Request latency in seconds", ["method", "endpoint"]
 )
 
 CAPABILITY_CHECKS = Counter(
-    'gateway_capability_checks_total',
-    'Capability verification attempts',
-    ['result']
+    "gateway_capability_checks_total", "Capability verification attempts", ["result"]
 )
 
-ACTIVE_SESSIONS = Gauge(
-    'gateway_active_sessions',
-    'Number of active sessions'
-)
+ACTIVE_SESSIONS = Gauge("gateway_active_sessions", "Number of active sessions")
 
 # Audit Forwarding counters
 AUDIT_FORWARD_SUCCESS = Counter(
-    'audit_forward_success_total',
-    'Total audit events successfully forwarded'
+    "audit_forward_success_total", "Total audit events successfully forwarded"
 )
 AUDIT_FORWARD_FAILURE = Counter(
-    'audit_forward_failure_total',
-    'Total audit events that failed to forward'
+    "audit_forward_failure_total", "Total audit events that failed to forward"
 )
+
 
 class AuditEventCreate(BaseModel):
     """Request model for creating audit events."""
@@ -198,7 +182,7 @@ class AuditEventResponse(BaseModel):
 
 
 # Schema version cache to avoid DB hammer
-from functools import lru_cache
+
 
 @lru_cache(maxsize=1)
 def _check_schema_version_cached(timestamp: int) -> tuple[str, str]:
@@ -222,8 +206,9 @@ def healthz() -> Dict[str, Any]:
         "status": "ok",
         "region": TALOS_REGION,
         "version": VERSION,
-        "uptime": time.time() - START_TIME
+        "uptime": time.time() - START_TIME,
     }
+
 
 @app.get("/health/ollama")
 async def health_ollama() -> Union[Dict[str, Any], JSONResponse]:
@@ -235,9 +220,13 @@ async def health_ollama() -> Union[Dict[str, Any], JSONResponse]:
         resp = requests.get(f"{url}/api/tags", timeout=2)
         if resp.status_code == 200:
             return {"status": "online"}
-        return JSONResponse(status_code=503, content={"status": "offline", "error": f"Ollama returned {resp.status_code}"})
+        return JSONResponse(
+            status_code=503,
+            content={"status": "offline", "error": f"Ollama returned {resp.status_code}"},
+        )
     except Exception as e:
         return JSONResponse(status_code=503, content={"status": "offline", "error": str(e)})
+
 
 @app.get("/health/tga")
 async def health_tga() -> Union[Dict[str, Any], JSONResponse]:
@@ -247,7 +236,10 @@ async def health_tga() -> Union[Dict[str, Any], JSONResponse]:
         resp = requests.get(f"{url}/health", timeout=2)
         if resp.status_code == 200:
             return {"status": "online"}
-        return JSONResponse(status_code=503, content={"status": "offline", "error": f"TGA returned {resp.status_code}"})
+        return JSONResponse(
+            status_code=503,
+            content={"status": "offline", "error": f"TGA returned {resp.status_code}"},
+        )
     except Exception as e:
         return JSONResponse(status_code=503, content={"status": "offline", "error": str(e)})
 
@@ -262,9 +254,13 @@ def readyz() -> Union[Dict[str, Any], JSONResponse]:
         if db_version != expected_version:
             return JSONResponse(
                 status_code=503,
-                content={"status": "not ready", "reason": f"Schema mismatch: {db_version} != {expected_version}", "region": TALOS_REGION}
+                content={
+                    "status": "not ready",
+                    "reason": f"Schema mismatch: {db_version} != {expected_version}",
+                    "region": TALOS_REGION,
+                },
             )
-    
+
     return {"status": "ready", "dev_mode": DEV_MODE, "region": TALOS_REGION}
 
 
@@ -276,7 +272,7 @@ def version() -> Dict[str, Any]:
         "git_sha": GIT_SHA,
         "build_time": BUILD_TIME,
         "service": "gateway",
-        "dev_mode": DEV_MODE
+        "dev_mode": DEV_MODE,
     }
 
 
@@ -291,17 +287,18 @@ def _get_metric_percentile(metric: Any, percentile: float) -> float:
                 buckets.append((float(s.labels["le"]), s.value))
             elif s.name.endswith("_count"):
                 total_count = s.value
-        
+
         if total_count == 0 or not buckets:
             return 0.0
-            
+
         buckets.sort()
         target = total_count * percentile
         prev_le = 0.0
         prev_count = 0.0
         for le, count in buckets:
             if count >= target:
-                if count == prev_count: return le * 1000.0
+                if count == prev_count:
+                    return le * 1000.0
                 ratio = (target - prev_count) / (count - prev_count)
                 return float((prev_le + (le - prev_le) * ratio) * 1000.0)
             prev_le = le
@@ -310,19 +307,20 @@ def _get_metric_percentile(metric: Any, percentile: float) -> float:
     except Exception:
         return 0.0
 
+
 @app.get("/metrics/summary")
 def metrics_summary() -> Dict[str, Any]:
     """Summary metrics for TUI/Dashboard"""
     # Extract total from counter
     samples = list(REQUEST_COUNT.collect())[0].samples
     total_reqs = sum(s.value for s in samples)
-    
+
     return {
         "latency_p50_ms": round(_get_metric_percentile(REQUEST_LATENCY, 0.5), 2),
         "latency_p95_ms": round(_get_metric_percentile(REQUEST_LATENCY, 0.95), 2),
         "connected_peers": len(ws_manager.active_connections),
         "active_sessions": len(background_tasks),
-        "total_requests": int(total_reqs)
+        "total_requests": int(total_reqs),
     }
 
 
@@ -345,26 +343,21 @@ def gateway_status() -> Dict[str, Any]:
     """Gateway status endpoint for integration tests."""
     uptime = int(time.time() - START_TIME)
     total_reqs = sum(s.value for s in list(REQUEST_COUNT.collect())[0].samples)
-    
+
     return {
         "schema_version": "1",
         "gateway_instance_id": INSTANCE_ID,
-        "status_seq": int(uptime / 10), 
+        "status_seq": int(uptime / 10),
         "state": "RUNNING",
         "version": VERSION,
         "uptime_seconds": uptime,
         "requests_processed": int(total_reqs),
-        "tenants": 1, # Dedicated single-tenant instance
-        "cache": {
-            "capability_cache_size": 0,
-            "hits": 0,
-            "misses": 0,
-            "evictions": 0
-        },
+        "tenants": 1,  # Dedicated single-tenant instance
+        "cache": {"capability_cache_size": 0, "hits": 0, "misses": 0, "evictions": 0},
         "sessions": {
             "active_sessions": len(ws_manager.active_connections) + len(background_tasks),
-            "replay_rejections_1h": 0
-        }
+            "replay_rejections_1h": 0,
+        },
     }
 
 
@@ -373,24 +366,21 @@ async def create_event(event: AuditEventCreate) -> Union[AuditEventResponse, JSO
     """Create a new audit event (Proxies to Audit Service)."""
     # Patch 2: Lock down boundary
     if not DEV_MODE:
-         return JSONResponse(
-             status_code=403, 
-             content={"error": "Direct audit submission disabled in production. Audits are generated as side-effects."}
-         )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "Direct audit submission disabled in production. Audits are generated as side-effects."
+            },
+        )
 
-    # Patch 1: Synchronous forward
-    import logging
-    logger = logging.getLogger("gateway-audit")
-    
     # Use UUIDv7 for time-ordered, cursor-compatible event IDs
     event_id = generate_uuid7()
     timestamp = int(time.time())
-    
+
     # Map to Audit Service Event model
     # Note: Audit Service expects structured fields: ts (ISO string), request_id, surface_id, principal, http, meta, event_hash
-    from datetime import datetime, timezone
     ts_iso = datetime.now(timezone.utc).isoformat()
-    
+
     # Prepare internal payload for Audit Service
     # We follow the audit-service Event model
     internal_payload = {
@@ -405,23 +395,19 @@ async def create_event(event: AuditEventCreate) -> Union[AuditEventResponse, JSO
         "http": {"method": "POST", "path": "/api/events"},
         "meta": {**(event.metadata or {}), "event_type": event.event_type},
         "resource": {"type": "event", "id": event.resource or "n/a"},
-        "event_hash": ""
+        "event_hash": "",
     }
-    
+
     # Calculate canonical hash (RFC 8785 simulator)
-    import hashlib
-    import json
     clean = {k: v for k, v in internal_payload.items() if k != "event_hash"}
     canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     internal_payload["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     logger.info(f"Forwarding audit event {event_id} to {AUDIT_SERVICE_URL}/api/events/ingest")
-    
+
     def forward() -> requests.Response:
         return requests.post(
-            f"{AUDIT_SERVICE_URL}/api/events/ingest",
-            json=internal_payload,
-            timeout=5.0
+            f"{AUDIT_SERVICE_URL}/api/events/ingest", json=internal_payload, timeout=5.0
         )
 
     try:
@@ -442,33 +428,33 @@ async def create_event(event: AuditEventCreate) -> Union[AuditEventResponse, JSO
             logger.error(f"Audit Service returned {res.status_code}: {res.text[:200]}")
             return JSONResponse(
                 status_code=res.status_code,
-                content={"error": "Audit service rejection", "details": res.text[:100]}
+                content={"error": "Audit service rejection", "details": res.text[:100]},
             )
     except Exception as e:
         AUDIT_FORWARD_FAILURE.inc()
         logger.error(f"Failed to forward audit event: {e}")
-        return JSONResponse(
-            status_code=503,
-            content={"error": "Audit Service Unavailable"}
-        )
+        return JSONResponse(status_code=503, content={"error": "Audit Service Unavailable"})
 
 
 @app.get("/api/events")
 def list_events(
-    limit: int = 100, 
-    cursor: Optional[str] = None, 
+    limit: int = 100,
+    cursor: Optional[str] = None,
     session_id: Optional[str] = None,
     correlation_id: Optional[str] = None,
-    outcome: Optional[str] = None
+    outcome: Optional[str] = None,
 ) -> Dict[str, Any]:
     """List recent audit events with filters."""
     container = get_app_container()
     audit_store = container.resolve(cast(Any, IAuditStorePort))
 
     filters = {}
-    if session_id: filters["session_id"] = session_id
-    if correlation_id: filters["correlation_id"] = correlation_id
-    if outcome: filters["outcome"] = outcome
+    if session_id:
+        filters["session_id"] = session_id
+    if correlation_id:
+        filters["correlation_id"] = correlation_id
+    if outcome:
+        filters["outcome"] = outcome
 
     page = audit_store.list(before=cursor, limit=limit, filters=filters)
 
@@ -512,18 +498,19 @@ def list_events(
 
 class TimeRange(BaseModel):
     """Time window for stats query."""
+
     start: float
     end: float
 
+
 @app.get("/api/events/stats")
 def get_event_stats(
-    from_ts: float = Query(..., alias="from"), 
-    to_ts: float = Query(..., alias="to")
+    from_ts: float = Query(..., alias="from"), to_ts: float = Query(..., alias="to")
 ) -> Dict[str, Any]:
     """Get audit statistics."""
     container = get_app_container()
     audit_store = container.resolve(cast(Any, IAuditStorePort))
-    
+
     window = TimeRange(start=from_ts, end=to_ts)
     stats = audit_store.stats(window)
     return {"count": stats.count}
@@ -605,7 +592,7 @@ async def chat_tool(req: ChatRequest) -> Union[Dict[str, Any], JSONResponse]:
     await emit_audit_event(
         audit_store,
         hash_port,
-        ws_manager, 
+        ws_manager,
         event_type="CHAT_REQUEST_RECEIVED",
         correlation_id=correlation_id,
         session_id=req.session_id,
@@ -704,7 +691,7 @@ async def chat_tool(req: ChatRequest) -> Union[Dict[str, Any], JSONResponse]:
 async def emit_audit_event(
     store: IAuditStorePort,
     hash_port: IHashPort,
-    ws_manager: Any, 
+    ws_manager: Any,
     event_type: str,
     correlation_id: str,
     session_id: str,
@@ -715,12 +702,10 @@ async def emit_audit_event(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Internal side-effect audit emitter (Synchronous Proxy)."""
-    import logging
     logger = logging.getLogger("gateway-audit-internal")
 
-    ts = int(time.time())
+    int(time.time())
     eid = generate_uuid7()
-    from datetime import datetime, timezone
     ts_iso = datetime.now(timezone.utc).isoformat()
 
     internal_payload = {
@@ -733,23 +718,24 @@ async def emit_audit_event(
         "outcome": outcome,
         "principal": {"id": agent_id, "type": "AGENT"},
         "http": {"method": "INTERNAL", "path": method},
-        "meta": {**(metadata or {}), "session_id": session_id, "correlation_id": correlation_id, "event_type": event_type},
+        "meta": {
+            **(metadata or {}),
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "event_type": event_type,
+        },
         "resource": {"type": "tool", "id": resource or "n/a"},
-        "event_hash": ""
+        "event_hash": "",
     }
 
     # Calculate canonical hash
-    import hashlib
-    import json
     clean = {k: v for k, v in internal_payload.items() if k != "event_hash"}
     canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     internal_payload["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def forward() -> requests.Response:
         return requests.post(
-            f"{AUDIT_SERVICE_URL}/api/events/ingest",
-            json=internal_payload,
-            timeout=5.0
+            f"{AUDIT_SERVICE_URL}/api/events/ingest", json=internal_payload, timeout=5.0
         )
 
     try:
