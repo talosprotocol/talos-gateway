@@ -13,6 +13,7 @@ COPY sdks/python /build/sdks/python
 COPY contracts/python /build/contracts/python
 COPY libs/talos-config /build/libs/talos-config
 COPY services/gateway/requirements.txt .
+RUN sed -i '/^-e/d' requirements.txt
 COPY services/governance-agent /build/services/governance-agent
 
 RUN pip wheel --no-cache-dir --wheel-dir /wheels \
