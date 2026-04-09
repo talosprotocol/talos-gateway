@@ -14,7 +14,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Set, Union, cast
+from typing import Any, Dict, List, Optional, Set, cast
 
 import requests
 from bootstrap import get_app_container
@@ -211,7 +211,7 @@ def healthz() -> Dict[str, Any]:
 
 
 @app.get("/health/ollama")
-async def health_ollama() -> Union[Dict[str, Any], JSONResponse]:
+async def health_ollama() -> Any:
     """Proxy health check to Ollama backend."""
     url = os.getenv("OLLAMA_URL", "http://ollama:11434")
     try:
@@ -229,7 +229,7 @@ async def health_ollama() -> Union[Dict[str, Any], JSONResponse]:
 
 
 @app.get("/health/tga")
-async def health_tga() -> Union[Dict[str, Any], JSONResponse]:
+async def health_tga() -> Any:
     """Proxy health check to Governance Agent."""
     url = os.getenv("TGA_URL", "http://talos-governance-agent:8083")
     try:
@@ -245,7 +245,7 @@ async def health_tga() -> Union[Dict[str, Any], JSONResponse]:
 
 
 @app.get("/readyz")
-def readyz() -> Union[Dict[str, Any], JSONResponse]:
+def readyz() -> Any:
     """Readiness probe - checks critical dependencies"""
     if not DEV_MODE:
         # Use cached check to avoid DB hammer
@@ -362,7 +362,7 @@ def gateway_status() -> Dict[str, Any]:
 
 
 @app.post("/api/events", response_model=AuditEventResponse)
-async def create_event(event: AuditEventCreate) -> Union[AuditEventResponse, JSONResponse]:
+async def create_event(event: AuditEventCreate) -> AuditEventResponse:
     """Create a new audit event (Proxies to Audit Service)."""
     # Patch 2: Lock down boundary
     if not DEV_MODE:
@@ -395,13 +395,11 @@ async def create_event(event: AuditEventCreate) -> Union[AuditEventResponse, JSO
         "http": {"method": "POST", "path": "/api/events"},
         "meta": {**(event.metadata or {}), "event_type": event.event_type},
         "resource": {"type": "event", "id": event.resource or "n/a"},
-        "event_hash": "",
     }
 
-    # Calculate canonical hash (RFC 8785 simulator)
-    clean = {k: v for k, v in internal_payload.items() if k != "event_hash"}
-    canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    internal_payload["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    # Calculate canonical hash
+    from talos_contracts import calculate_digest
+    internal_payload["event_hash"] = calculate_digest(internal_payload, exclude_fields=["event_hash"])
 
     logger.info(f"Forwarding audit event {event_id} to {AUDIT_SERVICE_URL}/api/events/ingest")
 
@@ -579,7 +577,7 @@ def invoke_connector_chat(req: ChatRequest, correlation_id: str) -> Dict[str, An
 
 
 @app.post("/mcp/tools/chat")
-async def chat_tool(req: ChatRequest) -> Union[Dict[str, Any], JSONResponse]:
+async def chat_tool(req: ChatRequest) -> Any:
     """Secure, audited chat tool endpoint."""
     container = get_app_container()
     audit_store = container.resolve(cast(Any, IAuditStorePort))
@@ -725,13 +723,11 @@ async def emit_audit_event(
             "event_type": event_type,
         },
         "resource": {"type": "tool", "id": resource or "n/a"},
-        "event_hash": "",
     }
 
     # Calculate canonical hash
-    clean = {k: v for k, v in internal_payload.items() if k != "event_hash"}
-    canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    internal_payload["event_hash"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    from talos_contracts import calculate_digest
+    internal_payload["event_hash"] = calculate_digest(internal_payload, exclude_fields=["event_hash"])
 
     def forward() -> requests.Response:
         return requests.post(

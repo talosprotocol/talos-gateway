@@ -4,10 +4,26 @@ set -euo pipefail
 # talos-gateway start script
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SERVICE_NAME="talos-gateway"
 PID_FILE="/tmp/${SERVICE_NAME}.pid"
 LOG_FILE="/tmp/${SERVICE_NAME}.log"
-PORT="${TALOS_GATEWAY_PORT:-8080}"
+PORT="${TALOS_GATEWAY_PORT:-8000}"
+HOST="${TALOS_BIND_HOST:-127.0.0.1}"
+
+source_env_file() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        set -a
+        . "$file"
+        set +a
+    fi
+}
+
+source_env_file "$ROOT_DIR/.env"
+source_env_file "$ROOT_DIR/.env.local"
+source_env_file "$REPO_DIR/.env"
+source_env_file "$REPO_DIR/.env.local"
 
 cd "$REPO_DIR"
 
@@ -19,9 +35,22 @@ fi
 
 # Start service
 echo "Starting $SERVICE_NAME on port $PORT..."
-TALOS_ENV="${TALOS_ENV:-production}" \
+MODE="${MODE:-${TALOS_ENV:-development}}"
+MODE_LOWER="$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')"
+case "$MODE_LOWER" in
+    dev|development|test)
+        DEV_MODE="${DEV_MODE:-true}"
+        ;;
+    *)
+        DEV_MODE="${DEV_MODE:-false}"
+        ;;
+esac
+
+TALOS_ENV="${TALOS_ENV:-development}" \
 TALOS_RUN_ID="${TALOS_RUN_ID:-default}" \
-uvicorn main:app --port "$PORT" --host 0.0.0.0 > "$LOG_FILE" 2>&1 &
+MODE="$MODE" \
+DEV_MODE="$DEV_MODE" \
+uvicorn main:app --port "$PORT" --host "$HOST" > "$LOG_FILE" 2>&1 &
 
 
 PID=$!
