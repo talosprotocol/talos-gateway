@@ -27,7 +27,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, ge
 from pydantic import BaseModel
 from src.config import settings
 from src.handlers import stream
-from src.routers import admin, mcp
+from src.routers import admin, mcp, rbac, config
 from src.routers.mcp import MCP_REGISTRY
 from src.stream.manager import manager as ws_manager
 from talos_sdk.ports.audit_store import IAuditStorePort
@@ -110,11 +110,14 @@ app = FastAPI(
     description="API Gateway for Talos Protocol audit events",
     version="0.1.0",
 )
+app.state.start_time = time.time()
 
 # Register WS Router
 app.include_router(stream.router)
 app.include_router(mcp.router)
 app.include_router(admin.router)
+app.include_router(rbac.router)
+app.include_router(config.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -667,9 +670,11 @@ async def chat_tool(req: ChatRequest) -> Any:
             return JSONResponse(status_code=500, content=mcp_res["error"])
         # Ensure strict Dict return
         result: Dict[str, Any] = mcp_res.get("result", {}) or {}
+        store.append(event)
         return result
 
     except Exception as e:
+        logger.error(f"Failed to audit tool call: {e}")
         await emit_audit_event(
             audit_store,
             hash_port,
@@ -697,6 +702,8 @@ async def emit_audit_event(
     method: str,
     resource: str,
     outcome: str = "OK",
+    denial_reason: Optional[str] = None,
+    latency_ms: Optional[float] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Internal side-effect audit emitter (Synchronous Proxy)."""
@@ -714,6 +721,8 @@ async def emit_audit_event(
         "request_id": correlation_id,
         "surface_id": "gateway-internal",
         "outcome": outcome,
+        "denial_reason": denial_reason or (metadata.get("denial_reason") if metadata else None),
+        "latency_ms": latency_ms,
         "principal": {"id": agent_id, "type": "AGENT"},
         "http": {"method": "INTERNAL", "path": method},
         "meta": {

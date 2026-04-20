@@ -59,10 +59,12 @@ class PostgresAuditStore:
                     INSERT INTO events (
                         event_id, schema_version, timestamp, cursor, event_type, outcome,
                         session_id, correlation_id, agent_id, peer_id, tool, method, resource,
+                        denial_reason, latency_ms,
                         metadata, metrics, hashes, integrity, integrity_hash
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s,
                         %s, %s, %s, %s, %s
                     )
                     ON CONFLICT (event_id) DO NOTHING
@@ -81,7 +83,9 @@ class PostgresAuditStore:
                         event.tool,
                         event.method,
                         event.resource,
-                        Json(event.metadata),
+                        getattr(event, 'denial_reason', event.metadata.get('denial_reason') if hasattr(event, 'metadata') else None),
+                        getattr(event, 'latency_ms', event.metrics.get('latency_ms') if hasattr(event, 'metrics') else None),
+                        Json(event.metadata if hasattr(event, 'metadata') else {}),
                         Json(getattr(event, 'metrics', {})),
                         Json(getattr(event, 'hashes', {})),
                         Json(getattr(event, 'integrity', {})),
@@ -138,25 +142,34 @@ class PostgresAuditStore:
             
     def stats(self, start_ts: float, end_ts: float) -> dict:
         """
-        Compute dashboard aggregations.
+        Compute dashboard aggregations using optimized columns.
         """
         try:
             with self._get_cursor() as cur:
-                # 1. Basic counts
+                # 1. Basic counts + Latency summary
                 cur.execute(
-                    "SELECT COUNT(*) as total, SUM(CASE WHEN outcome = 'OK' THEN 1 ELSE 0 END) as success FROM events WHERE timestamp BETWEEN %s AND %s",
+                    """
+                    SELECT 
+                        COUNT(*) as total, 
+                        SUM(CASE WHEN outcome = 'OK' THEN 1 ELSE 0 END) as success,
+                        AVG(latency_ms) as avg_latency,
+                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms) as p50,
+                        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms) as p95
+                    FROM events 
+                    WHERE timestamp BETWEEN %s AND %s
+                    """,
                     (start_ts, end_ts)
                 )
                 base = cur.fetchone()
                 total = base['total'] or 0
                 success = base['success'] or 0
                 
-                # 2. Denial reasons
+                # 2. Denial reasons (Optimized via indexed column)
                 cur.execute(
-                    "SELECT denial_reason, COUNT(*) as count FROM events WHERE outcome = 'DENY' AND timestamp BETWEEN %s AND %s GROUP BY denial_reason",
+                    "SELECT denial_reason, COUNT(*) as count FROM events WHERE outcome = 'DENY' AND denial_reason IS NOT NULL AND timestamp BETWEEN %s AND %s GROUP BY denial_reason",
                     (start_ts, end_ts)
                 )
-                reasons = {row['denial_reason']: row['count'] for row in cur.fetchall() if row['denial_reason']}
+                reasons = {row['denial_reason']: row['count'] for row in cur.fetchall()}
                 
                 # 3. Time series (1h buckets)
                 cur.execute(
@@ -181,6 +194,9 @@ class PostgresAuditStore:
                 return {
                     "requests_24h": total,
                     "auth_success_rate": (success / total) if total > 0 else 1.0,
+                    "avg_latency_ms": base['avg_latency'] or 0,
+                    "latency_p50_ms": base['p50'] or 0,
+                    "latency_p95_ms": base['p95'] or 0,
                     "denial_reason_counts": reasons,
                     "request_volume_series": series
                 }
@@ -189,6 +205,7 @@ class PostgresAuditStore:
             return {
                 "requests_24h": 0,
                 "auth_success_rate": 0,
+                "latency_p50_ms": 0,
                 "denial_reason_counts": {},
                 "request_volume_series": []
             }

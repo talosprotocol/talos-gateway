@@ -24,6 +24,8 @@ MCP_REGISTRY = {
        for k, v in os.environ.items() if k.startswith("MCP_SERVER_")}
 }
 
+TGA_URL = os.getenv("TGA_URL", "http://talos-governance-agent:8083")
+
 # --- Models ---
 class ToolCallRequest(BaseModel):
     input: Dict[str, Any]
@@ -119,9 +121,50 @@ def get_tool_schema(server_id: str, tool_name: str, token: str = Depends(verify_
     raise HTTPException(status_code=404, detail="Tool not found")
 
 @router.post("/servers/{server_id}/tools/{tool_name}:call")
-def call_tool(server_id: str, tool_name: str, req: ToolCallRequest, token: str = Depends(verify_token_header)) -> Dict[str, Any]:
-    """Invoke a tool (proxied)."""
+def call_tool(
+    server_id: str, 
+    tool_name: str, 
+    req: ToolCallRequest, 
+    token: str = Depends(verify_token_header),
+    capability: Optional[str] = Header(None, alias="X-Talos-Capability"),
+    session_id: Optional[str] = Header(None, alias="X-Talos-Session")
+) -> Dict[str, Any]:
+    """Invoke a tool with Governance Agent authorization gate."""
     base_url = get_upstream_url(server_id)
+    principal_id = "admin-user" # Future: Extract from require_auth token
+    
+    # --- 1. Governance Authorization Gate ---
+    tga_context = None
+    if capability or session_id:
+        try:
+            tga_payload = {
+                "jsonrpc": "2.0",
+                "method": "governance_authorize",
+                "params": {
+                    "capability_jws": capability,
+                    "session_id": session_id,
+                    "principal_id": principal_id,
+                    "tool_server": server_id,
+                    "tool_name": tool_name,
+                    "args": req.input
+                },
+                "id": str(uuid.uuid4())
+            }
+            # FastMCP SSE endpoint for tools
+            tga_resp = requests.post(TGA_URL, json=tga_payload, timeout=5)
+            tga_resp.raise_for_status()
+            tga_data = tga_resp.json()
+            
+            if "error" in tga_data:
+                raise HTTPException(status_code=403, detail=f"Governance Denial: {tga_data['error']}")
+            
+            tga_context = tga_data.get("result", {}).get("tool_call")
+            if not tga_context:
+                raise HTTPException(status_code=403, detail="Governance Agent returned invalid authorization context")
+                
+        except Exception as e:
+            if isinstance(e, HTTPException): raise e
+            raise HTTPException(status_code=502, detail=f"Governance Check Failed: {str(e)}")
     
     
     # Live Audit Log
@@ -159,7 +202,8 @@ def call_tool(server_id: str, tool_name: str, req: ToolCallRequest, token: str =
         store.append(event)
     except Exception as e:
         # Non-blocking audit failure
-        print(f"WARN: Failed to audit tool call: {e}")
+        import logging
+        logging.getLogger("talos-mcp").error(f"Failed to audit tool call: {e}")
     
     payload = {
         "jsonrpc": "2.0",
@@ -171,22 +215,65 @@ def call_tool(server_id: str, tool_name: str, req: ToolCallRequest, token: str =
         "id": str(uuid.uuid4())
     }
     
+    start_time = time.time()
     try:
         resp = requests.post(base_url, json=payload, timeout=30)
+        duration_ms = (time.time() - start_time) * 1000
         resp.raise_for_status()
         data = resp.json()
         
+        outcome = "OK"
         if "error" in data:
-            # Gateway shouldn't crash, return error in body
+            outcome = "ERROR"
+            
+        # Complete the audit trail with latency
+        try:
+            event.outcome = outcome
+            event.latency_ms = duration_ms
+            if outcome == "ERROR":
+                event.metadata["error"] = data["error"]
+            store.append(event) # Re-append updates existing UUID in store
+        except: pass
+
+        if "error" in data:
             return {
                 "request_id": payload["id"],
                 "error": data["error"]
             }
             
+        # --- 3. Governance Effect Recording ---
+        if tga_context:
+            try:
+                log_payload = {
+                    "jsonrpc": "2.0",
+                    "method": "governance_log",
+                    "params": {
+                        "trace_id": tga_context.get("trace_id"),
+                        "key": str(uuid.uuid4()),
+                        "artifact_type": "TOOL_EFFECT",
+                        "artifact_data": {
+                            "tool_effect_id": str(uuid.uuid4()),
+                            "outcome": {"status": outcome},
+                            "output_digest": _compute_hash(data.get("result", {})) if outcome == "OK" else ""
+                        }
+                    },
+                    "id": str(uuid.uuid4())
+                }
+                requests.post(TGA_URL, json=log_payload, timeout=2)
+            except: pass # Non-blocking for effect recording failure
+            
         return {
             "request_id": payload["id"],
-            "output": data.get("result", {})
+            "output": data.get("result", {}),
+            "governance_trace": tga_context.get("trace_id") if tga_context else None
         }
         
     except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        try:
+            event.outcome = "ERROR"
+            event.latency_ms = duration_ms
+            event.metadata["error"] = str(e)
+            store.append(event)
+        except: pass
         raise HTTPException(status_code=502, detail=f"Invocation failed: {str(e)}")

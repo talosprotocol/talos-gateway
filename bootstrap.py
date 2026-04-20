@@ -26,9 +26,14 @@ def bootstrap() -> Container:
     
     if storage_type == "postgres":
         from src.adapters.postgres_store import PostgresAuditStore
+        from src.adapters.postgres_admin_store import PostgresAdminStore
         container.register(IAuditStorePort, PostgresAuditStore())
+        container.register(PostgresAdminStore, PostgresAdminStore())
     else:
+        # Fallback for dev mocks
+        from src.adapters.postgres_admin_store import PostgresAdminStore
         container.register(IAuditStorePort, InMemoryAuditStore())
+        container.register(PostgresAdminStore, PostgresAdminStore())
 
     container.register(ICryptoPort, Ed25519CryptoAdapter())
     container.register(IHashPort, NativeHashAdapter())
