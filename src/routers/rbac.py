@@ -19,14 +19,14 @@ class RbacBinding(BaseModel):
     bindings: List[Dict[str, str]] # List of {role_id, scope}
 
 @router.get("/roles")
-async def list_roles(_: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def list_roles(_: str = Depends(require_auth)) -> Dict[str, Any]:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     roles = store.list_roles()
     return {"roles": roles}
 
 @router.post("/roles")
-async def upsert_role(role: RbacRole, _: Any = Depends(require_auth)) -> RbacRole:
+async def upsert_role(role: RbacRole, _: str = Depends(require_auth)) -> RbacRole:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     updated = store.upsert_role(
@@ -35,7 +35,7 @@ async def upsert_role(role: RbacRole, _: Any = Depends(require_auth)) -> RbacRol
     return RbacRole(**updated)
 
 @router.delete("/roles/{role_id}")
-async def delete_role(role_id: str, _: Any = Depends(require_auth)) -> Dict[str, bool]:
+async def delete_role(role_id: str, _: str = Depends(require_auth)) -> Dict[str, bool]:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     success = store.delete_role(role_id)
@@ -49,21 +49,21 @@ async def delete_role(role_id: str, _: Any = Depends(require_auth)) -> Dict[str,
     return {"success": True}
 
 @router.get("/bindings")
-async def list_bindings(_: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def list_bindings(_: str = Depends(require_auth)) -> Dict[str, Any]:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     bindings = store.list_bindings()
     return {"bindings": bindings}
 
 @router.post("/bindings")
-async def upsert_binding(binding: RbacBinding, _: Any = Depends(require_auth)) -> RbacBinding:
+async def upsert_binding(binding: RbacBinding, _: str = Depends(require_auth)) -> RbacBinding:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     updated = store.upsert_binding(binding.principal_id, binding.bindings)
     return RbacBinding(**updated)
 
 @router.delete("/bindings/{principal_id}")
-async def delete_binding(principal_id: str, _: Any = Depends(require_auth)) -> Dict[str, bool]:
+async def delete_binding(principal_id: str, _: str = Depends(require_auth)) -> Dict[str, bool]:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     success = store.delete_binding(principal_id)

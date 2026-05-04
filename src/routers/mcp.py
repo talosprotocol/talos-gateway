@@ -12,7 +12,7 @@ import json
 import time
 from bootstrap import get_app_container
 from talos_sdk.ports.audit_store import IAuditStorePort
-from src.auth import require_auth, verify_token_header
+from src.auth import verify_token_header
 
 # Configuration
 # Default to cluster-local DNS for MCP Connector
@@ -180,7 +180,8 @@ def call_tool(
             def __init__(self, **kwargs: Any) -> None:
                 self.__dict__.update(kwargs)
                 
-        event: Any = AuditEntry(
+        from talos_sdk.ports.audit_store import AuditEvent
+        event: AuditEvent = AuditEntry(
             event_id=str(uuid.uuid4()),
             timestamp=time.time(),
             # Required fields for Postgres store:
@@ -233,7 +234,8 @@ def call_tool(
             if outcome == "ERROR":
                 event.metadata["error"] = data["error"]
             store.append(event) # Re-append updates existing UUID in store
-        except: pass
+        except Exception as e:
+            logger.warning(f"Audit append failed: {e}")
 
         if "error" in data:
             return {
@@ -260,7 +262,8 @@ def call_tool(
                     "id": str(uuid.uuid4())
                 }
                 requests.post(TGA_URL, json=log_payload, timeout=2)
-            except: pass # Non-blocking for effect recording failure
+            except Exception as e:
+                logger.warning(f"Governance effect recording failed: {e}")
             
         return {
             "request_id": payload["id"],
@@ -275,5 +278,6 @@ def call_tool(
             event.latency_ms = duration_ms
             event.metadata["error"] = str(e)
             store.append(event)
-        except: pass
+        except Exception as e:
+            logger.warning(f"Audit append failed: {e}")
         raise HTTPException(status_code=502, detail=f"Invocation failed: {str(e)}")

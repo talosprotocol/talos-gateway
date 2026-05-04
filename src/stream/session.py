@@ -2,8 +2,8 @@ import logging
 import time
 from typing import Optional
 from fastapi import WebSocket
-from src.stream.types import InitMessage, ErrorMessage, ErrorCode, CloseCode, WSMsgType, InitAckMessage
-from datetime import datetime, timedelta
+from src.stream.types import InitMessage, ErrorMessage, ErrorCode, CloseCode, InitAckMessage
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 

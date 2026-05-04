@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Dict, Any, List
+from typing import Dict, Any
 from bootstrap import get_app_container
 from src.adapters.postgres_admin_store import PostgresAdminStore
 from src.routers.mcp import MCP_REGISTRY
@@ -8,7 +8,7 @@ from src.auth import require_auth
 router = APIRouter(prefix="/admin/v1/config", tags=["config"])
 
 @router.get(":export")
-async def export_config(_: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def export_config(_: str = Depends(require_auth)) -> Dict[str, Any]:
     """Export current platform configuration."""
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
@@ -48,7 +48,7 @@ async def export_config(_: Any = Depends(require_auth)) -> Dict[str, Any]:
     return config
 
 @router.post(":apply")
-async def apply_config(config: Dict[str, Any], _: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def apply_config(config: Dict[str, Any], _: str = Depends(require_auth)) -> Dict[str, Any]:
     """Apply platform configuration from snapshot."""
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)

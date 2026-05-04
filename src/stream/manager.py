@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from typing import Dict, Set
+from typing import Dict
 from fastapi import WebSocket, WebSocketDisconnect
 from .types import ErrorMessage, ErrorCode, CloseCode, WSMsgType
 

@@ -1,7 +1,6 @@
 import os
 import sys
-from typing import Optional
-from talos_config import ConfigurationLoader, ConfigurationError
+from talos_config import ConfigurationLoader
 
 class GatewayConfig:
     def __init__(self):

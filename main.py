@@ -4,8 +4,6 @@ Exposes REST API for audit events and integrity verification.
 """
 
 import asyncio
-import hashlib
-import json
 import logging
 import os
 import struct
@@ -29,7 +27,7 @@ from src.config import settings
 from src.handlers import stream
 from src.routers import admin, mcp, rbac, config
 from src.routers.mcp import MCP_REGISTRY
-from src.stream.manager import manager as ws_manager
+from src.stream.manager import ConnectionManager, manager as ws_manager
 from talos_sdk.ports.audit_store import IAuditStorePort
 from talos_sdk.ports.hash import IHashPort
 
@@ -332,13 +330,6 @@ async def metrics() -> Response:
     # Update gauge metrics
     ACTIVE_SESSIONS.set(len(background_tasks))
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-
-# Deprecated /health endpoint for backward compatibility
-@app.get("/health")
-def health_check() -> Dict[str, Any]:
-    """Health check endpoint (deprecated, use /healthz)"""
-    return {"status": "ok", "timestamp": time.time()}
 
 
 @app.get("/api/gateway/status")
@@ -694,7 +685,7 @@ async def chat_tool(req: ChatRequest) -> Any:
 async def emit_audit_event(
     store: IAuditStorePort,
     hash_port: IHashPort,
-    ws_manager: Any,
+    ws_manager: "ConnectionManager",
     event_type: str,
     correlation_id: str,
     session_id: str,

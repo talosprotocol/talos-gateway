@@ -96,7 +96,7 @@ class PostgresAuditStore:
             logger.error(f"Failed to insert event: {e}")
             raise
 
-    def list(self, before: Optional[str] = None, limit: int = 100, filters: Any = None) -> EventPage:
+    def list(self, before: Optional[str] = None, limit: int = 100, filters: Optional[dict[str, Any]] = None) -> EventPage:
         """
         List events with optional filtering.
         """

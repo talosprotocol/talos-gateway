@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
-from typing import Any, cast, Dict, List, Optional
+from typing import Any, cast, Dict, Optional
 import os
 import time
 import uuid
@@ -38,7 +38,7 @@ active_rotations: Dict[str, RotationOperation] = {}
 # --- Identity & Status ---
 
 @router.get("/me")
-async def get_current_user(_: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def get_current_user(_: str = Depends(require_auth)) -> Dict[str, Any]:
     return {
         "id": "admin-001",
         "email": os.getenv("ADMIN_EMAIL", "admin@talos.security"),
@@ -47,7 +47,7 @@ async def get_current_user(_: Any = Depends(require_auth)) -> Dict[str, Any]:
     }
 
 @router.get("/gateway/status")
-async def get_gateway_status(request: Request, _: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def get_gateway_status(request: Request, _: str = Depends(require_auth)) -> Dict[str, Any]:
     """Get aggregated health and system status."""
     uptime = time.time() - getattr(request.app.state, 'start_time', time.time())
     return {
@@ -61,7 +61,7 @@ async def get_gateway_status(request: Request, _: Any = Depends(require_auth)) -
 # --- Secrets Management ---
 
 @router.get("/secrets")
-async def list_secrets(_: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def list_secrets(_: str = Depends(require_auth)) -> Dict[str, Any]:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     
@@ -97,7 +97,7 @@ async def list_secrets(_: Any = Depends(require_auth)) -> Dict[str, Any]:
     }
 
 @router.post("/secrets")
-async def create_secret(secret: SecretCreate, _: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def create_secret(secret: SecretCreate, _: str = Depends(require_auth)) -> Dict[str, Any]:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     encryptor = SecretEncryptor() # Uses TALOS_MASTER_KEY from env
@@ -112,7 +112,7 @@ async def create_secret(secret: SecretCreate, _: Any = Depends(require_auth)) ->
     return {"status": "created", "name": secret.name}
 
 @router.delete("/secrets/{name}")
-async def delete_secret(name: str, _: Any = Depends(require_auth)) -> Dict[str, bool]:
+async def delete_secret(name: str, _: str = Depends(require_auth)) -> Dict[str, bool]:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     success = store.delete_secret(name)
@@ -123,7 +123,7 @@ async def delete_secret(name: str, _: Any = Depends(require_auth)) -> Dict[str, 
     return {"success": True}
 
 @router.get("/secrets/kek-status")
-async def get_kek_status(_: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def get_kek_status(_: str = Depends(require_auth)) -> Dict[str, Any]:
     container = get_app_container()
     store = container.resolve(PostgresAdminStore)
     
@@ -164,7 +164,7 @@ async def perform_rotation(op_id: str):
         op.message = str(e)
 
 @router.post("/secrets/rotate-all")
-async def rotate_all_secrets(background_tasks: BackgroundTasks, _: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def rotate_all_secrets(background_tasks: BackgroundTasks, _: str = Depends(require_auth)) -> Dict[str, Any]:
     # Check if a rotation is already running
     for op in active_rotations.values():
         if op.status == 'RUNNING':
@@ -188,7 +188,7 @@ async def rotate_all_secrets(background_tasks: BackgroundTasks, _: Any = Depends
     }
 
 @router.get("/secrets/rotation-status/{op_id}")
-async def get_rotation_status(op_id: str, _: Any = Depends(require_auth)) -> RotationOperation:
+async def get_rotation_status(op_id: str, _: str = Depends(require_auth)) -> RotationOperation:
     if op_id not in active_rotations:
         raise HTTPException(status_code=404, detail="Operation not found")
     return active_rotations[op_id]
@@ -196,7 +196,7 @@ async def get_rotation_status(op_id: str, _: Any = Depends(require_auth)) -> Rot
 # --- Telemetry & Audit Statistics ---
 
 @router.get("/telemetry/stats")
-async def telemetry_stats(window_hours: int = 24, _: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def telemetry_stats(window_hours: int = 24, _: str = Depends(require_auth)) -> Dict[str, Any]:
     container = get_app_container()
     store = container.resolve(cast(Any, IAuditStorePort))
     
@@ -213,7 +213,7 @@ async def telemetry_stats(window_hours: int = 24, _: Any = Depends(require_auth)
     }
 
 @router.get("/audit/stats")
-async def audit_stats(window_hours: int = 24, _: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def audit_stats(window_hours: int = 24, _: str = Depends(require_auth)) -> Dict[str, Any]:
     container = get_app_container()
     store = container.resolve(cast(Any, IAuditStorePort))
     
@@ -223,7 +223,7 @@ async def audit_stats(window_hours: int = 24, _: Any = Depends(require_auth)) ->
     return store.stats(start_ts, now)
 
 @router.get("/governance/logs")
-async def get_governance_logs(trace_id: Optional[str] = None, limit: int = 50, _: Any = Depends(require_auth)) -> Dict[str, Any]:
+async def get_governance_logs(trace_id: Optional[str] = None, limit: int = 50, _: str = Depends(require_auth)) -> Dict[str, Any]:
     """Proxy to TGA's log export tool."""
     try:
         tga_payload = {

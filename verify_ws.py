@@ -1,6 +1,5 @@
 import asyncio
 import json
-import time
 import uuid
 import sys
 import websockets

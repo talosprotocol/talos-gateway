@@ -1,7 +1,6 @@
 from enum import Enum
 from typing import Optional, Literal, Union, Dict, Any
-from pydantic import BaseModel, Field
-import time
+from pydantic import BaseModel
 
 class WSMsgType(str, Enum):
     INIT = "init"
